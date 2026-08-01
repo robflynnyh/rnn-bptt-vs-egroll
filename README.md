@@ -141,7 +141,7 @@ rnn-memory-compare \
 
 The tuned grouped EGGROLL launcher uses `P=8192`, 8 unique sequences, one full
 population chunk, BF16 candidate forwards, rank-1 perturbations, `sigma=0.005`,
-and SGD learning rate `0.01`:
+SGD learning rate `0.01`, and 300,000 generations by default:
 
 ```bash
 bash scripts/launch_eggroll_zoology.sh

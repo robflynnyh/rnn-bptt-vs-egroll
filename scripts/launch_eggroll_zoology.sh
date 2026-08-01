@@ -7,13 +7,14 @@ cd "$repo_root"
 export PYTHONPATH=src
 mkdir -p .scratch artifacts/eggroll_zoology
 
-name=eggroll-zoology-grouped-p8192-u8-bf16-lr1e-2-seed7
+generations="${GENERATIONS:-300000}"
+name="eggroll-zoology-grouped-p8192-u8-bf16-lr1e-2-g${generations}-seed7"
 python -u -m rnn_bptt_vs_eggroll.experiment \
     --method eggroll \
     --preset reference \
     --device cuda \
     --seed 7 \
-    --generations 3000 \
+    --generations "$generations" \
     --batch-size 8 \
     --hidden-size 64 \
     --population-size 8192 \
