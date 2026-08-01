@@ -41,7 +41,6 @@ class ExperimentConfig:
     curriculum_enabled: bool = True
     curriculum_delays: tuple[int, ...] = (0, 2, 4, 8, 16, 32)
     curriculum_accuracy_threshold: float = 0.9
-    curriculum_consecutive_probes: int = 2
     curriculum_frontier_probability: float = 0.5
     curriculum_probe_examples: int = 512
     curriculum_gate: str = "all"
@@ -90,8 +89,6 @@ class ExperimentConfig:
             raise ValueError("curriculum delays must lie inside the training range")
         if not 0 <= self.curriculum_accuracy_threshold <= 1:
             raise ValueError("curriculum_accuracy_threshold must be in [0, 1]")
-        if self.curriculum_consecutive_probes < 1:
-            raise ValueError("curriculum_consecutive_probes must be positive")
         if not 0 <= self.curriculum_frontier_probability <= 1:
             raise ValueError("curriculum_frontier_probability must be in [0, 1]")
         if self.curriculum_probe_examples < 1:
@@ -158,7 +155,6 @@ def smoke_config(seed: int = 7) -> ExperimentConfig:
         train_min_delay=0,
         train_max_delay=4,
         curriculum_delays=(0, 2, 4),
-        curriculum_consecutive_probes=1,
         curriculum_probe_examples=16,
         evaluation_pairs=(1, 2),
         evaluation_delays=(0, 2, 4, 8),
@@ -179,7 +175,6 @@ class CurriculumState:
     """Mutable state shared across workers while configuration stays immutable."""
 
     stage: int = 0
-    consecutive_passes: int = 0
     transitions: list[dict[str, Any]] = field(default_factory=list)
 
     def current_max_delay(self, config: ExperimentConfig) -> int:
@@ -218,13 +213,9 @@ def _broadcast_curriculum_state(
 ) -> None:
     if not dist.is_initialized():
         return
-    values = torch.tensor(
-        [state.stage, state.consecutive_passes],
-        device=device,
-        dtype=torch.long,
-    )
+    values = torch.tensor([state.stage], device=device, dtype=torch.long)
     dist.broadcast(values, src=0)
-    state.stage, state.consecutive_passes = (int(value) for value in values.tolist())
+    state.stage = int(values.item())
 
 
 def _gather_equal_shards(values: Tensor) -> Tensor:
@@ -318,21 +309,16 @@ def update_curriculum(
     *,
     generation: int,
 ) -> dict[str, Any] | None:
-    """Advance one stage after enough consecutive successful frontier probes."""
+    """Advance one stage when the selected gate passes its frontier probe."""
 
     if not config.curriculum_enabled:
         return None
-    if _curriculum_gate_passes(accuracies, config):
-        state.consecutive_passes += 1
-    else:
-        state.consecutive_passes = 0
-    if state.consecutive_passes < config.curriculum_consecutive_probes:
+    if not _curriculum_gate_passes(accuracies, config):
         return None
     if state.stage == len(config.curriculum_delays) - 1:
         return None
     previous_delay = config.curriculum_delays[state.stage]
     state.stage += 1
-    state.consecutive_passes = 0
     transition = {
         "generation": generation,
         "from_max_delay": previous_delay,
@@ -660,9 +646,6 @@ def run_experiment(
                     {
                         "probe_examples": config.curriculum_probe_examples,
                         "frontier_accuracies": probe_accuracies,
-                        "consecutive_passes_after_probe": (
-                            curriculum_state.consecutive_passes
-                        ),
                         "transition": transition,
                         "stage_after_probe": curriculum_state.stage,
                         "max_delay_after_probe": (
@@ -828,7 +811,6 @@ def run_experiment(
             "last_trained_max_delay": last_training_frontier,
             "next_max_delay": curriculum_state.current_max_delay(config),
             "final_stage": curriculum_state.stage,
-            "consecutive_passes": curriculum_state.consecutive_passes,
             "transitions": curriculum_state.transitions,
         },
         "test": {
@@ -882,7 +864,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--curriculum-delays", type=_parse_int_tuple)
     parser.add_argument("--curriculum-accuracy-threshold", type=float)
-    parser.add_argument("--curriculum-consecutive-probes", type=int)
     parser.add_argument("--curriculum-frontier-probability", type=float)
     parser.add_argument("--curriculum-probe-examples", type=int)
     parser.add_argument(
@@ -915,7 +896,6 @@ def _apply_cli_overrides(config: ExperimentConfig, args: argparse.Namespace) -> 
         "train_max_delay",
         "curriculum_delays",
         "curriculum_accuracy_threshold",
-        "curriculum_consecutive_probes",
         "curriculum_frontier_probability",
         "curriculum_probe_examples",
         "curriculum_gate",

@@ -38,18 +38,17 @@ start. It begins at delay 0 and uses the frontier sequence
 `0, 2, 4, 8, 16, 32`. Half of training batches use the current frontier; the
 rest rehearse previously introduced delays. At each evaluation, both models
 are measured on a fixed validation probe at the frontier. The shared frontier
-advances after both models exceed 90% accuracy on two consecutive probes.
+advances as soon as both models exceed 90% accuracy on that probe.
 
 Gating on both models is the default because it keeps their labelled stream
-identical. The threshold, patience, frontier sampling probability, milestones,
-and gate are configurable:
+identical. The threshold, frontier sampling probability, milestones, and gate
+are configurable:
 
 ```bash
 rnn-memory-compare \
   --preset reference \
   --curriculum-delays 0,1,2,4,8,16,32 \
   --curriculum-accuracy-threshold 0.9 \
-  --curriculum-consecutive-probes 2 \
   --curriculum-gate all
 ```
 
