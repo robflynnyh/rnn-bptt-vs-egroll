@@ -112,11 +112,11 @@ def _population_affine(
     else:
         raise ValueError("population affine input must be [B, D] or [P, B, D]")
     perturbation = torch.einsum("pbr,por->pbo", projected, left)
-    outputs = base + (sigma / math.sqrt(noise.rank)) * perturbation
+    outputs = perturbation.mul_(sigma / math.sqrt(noise.rank)).add_(base)
     if bias is not None:
         if bias_name is None:
             raise ValueError("bias_name is required when a bias is provided")
-        outputs = outputs + sigma * _signed_pair(noise.vectors[bias_name])[:, None]
+        outputs.add_(sigma * _signed_pair(noise.vectors[bias_name])[:, None])
     return outputs
 
 
@@ -220,6 +220,64 @@ def slice_pair_noise(noise: AntitheticNoise, start: int, end: int) -> Antithetic
 
 
 @torch.no_grad()
+def _population_loss_and_accuracy(
+    model: VanillaRNN,
+    inputs: Tensor,
+    targets: Tensor,
+    noise: AntitheticNoise,
+    sigma: float,
+) -> tuple[Tensor, Tensor]:
+    """Accumulate exact query metrics without retaining every readout logit."""
+
+    hidden = model.input_weight.new_zeros(
+        noise.population_size, inputs.shape[0], model.hidden_size,
+    )
+    loss_sums = model.input_weight.new_zeros(noise.population_size)
+    correct_counts = model.input_weight.new_zeros(noise.population_size)
+    supervised_count = 0
+
+    for time, token_ids in enumerate(inputs.unbind(dim=1)):
+        input_term = _population_embedding(
+            token_ids, model.input_weight, "input_weight", noise, sigma,
+        )
+        recurrent_term = _population_affine(
+            hidden,
+            model.recurrent_weight,
+            "recurrent_weight",
+            noise,
+            sigma,
+            bias=model.hidden_bias,
+            bias_name="hidden_bias",
+        )
+        hidden = torch.tanh(input_term + recurrent_term)
+
+        selected = targets[:, time].ne(-100)
+        if not selected.any():
+            continue
+        selected_targets = targets[:, time][selected]
+        logits = _population_affine(
+            hidden[:, selected],
+            model.output_weight,
+            "output_weight",
+            noise,
+            sigma,
+            bias=model.output_bias,
+            bias_name="output_bias",
+        )
+        target_logits = logits.gather(
+            -1,
+            selected_targets[None, :, None].expand(noise.population_size, -1, 1),
+        ).squeeze(-1)
+        loss_sums += (torch.logsumexp(logits, dim=-1) - target_logits).sum(dim=-1)
+        correct_counts += logits.argmax(dim=-1).eq(selected_targets).sum(dim=-1)
+        supervised_count += selected_targets.numel()
+
+    if supervised_count == 0:
+        raise ValueError("targets must select at least one supervised position")
+    return loss_sums / supervised_count, correct_counts / supervised_count
+
+
+@torch.no_grad()
 def evaluate_population(
     model: VanillaRNN,
     inputs: Tensor,
@@ -242,28 +300,9 @@ def evaluate_population(
         chunk = slice_pair_noise(
             noise, start, min(start + pair_chunk_size, noise.pair_count),
         )
-        readout_mask = targets.ne(-100)
-        logits = population_forward(
-            model, inputs, chunk, sigma, readout_mask=readout_mask,
+        losses, accuracies = _population_loss_and_accuracy(
+            model, inputs, targets, chunk, sigma,
         )
-        supervised_targets = torch.cat(
-            [
-                targets[:, time][readout_mask[:, time]]
-                for time in range(targets.shape[1])
-            ]
-        )
-        losses = (
-            -logits.log_softmax(dim=-1)
-            .gather(
-                dim=-1,
-                index=supervised_targets[None, :, None].expand(
-                    chunk.population_size, -1, 1
-                ),
-            )
-            .squeeze(-1)
-            .mean(dim=-1)
-        )
-        accuracies = logits.argmax(dim=-1).eq(supervised_targets).float().mean(dim=-1)
         positive_losses.append(losses[: chunk.pair_count])
         negative_losses.append(losses[chunk.pair_count :])
         positive_accuracies.append(accuracies[: chunk.pair_count])

@@ -59,7 +59,7 @@ class ExperimentConfig:
     hidden_size: int = 64
     recurrent_radius: float = 0.9
     population_size: int = 16_384
-    population_chunk_size: int = 2
+    population_chunk_size: int = 1_024
     perturbation_rank: int = 1
     sigma: float = 0.005
     sigma_decay: float = 1.0
