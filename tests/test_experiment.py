@@ -10,12 +10,11 @@ from rnn_bptt_vs_eggroll.experiment import (
 )
 
 
-def test_curriculum_waits_for_both_models_and_consecutive_probes() -> None:
+def test_curriculum_waits_for_both_models() -> None:
     config = replace(
         smoke_config(),
         curriculum_delays=(0, 4),
         curriculum_accuracy_threshold=0.75,
-        curriculum_consecutive_probes=2,
     )
     state = CurriculumState()
     assert update_curriculum(
@@ -24,18 +23,11 @@ def test_curriculum_waits_for_both_models_and_consecutive_probes() -> None:
         config,
         generation=1,
     ) is None
-    assert state.consecutive_passes == 0
-    assert update_curriculum(
-        state,
-        {"bptt": 0.8, "eggroll": 0.8},
-        config,
-        generation=2,
-    ) is None
     transition = update_curriculum(
         state,
         {"bptt": 0.9, "eggroll": 0.8},
         config,
-        generation=3,
+        generation=2,
     )
     assert transition is not None
     assert state.current_max_delay(config) == 4
@@ -55,7 +47,6 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
         population_chunk_size=4,
         curriculum_delays=(0, 4),
         curriculum_accuracy_threshold=0.0,
-        curriculum_consecutive_probes=1,
         curriculum_probe_examples=4,
     )
     results = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
