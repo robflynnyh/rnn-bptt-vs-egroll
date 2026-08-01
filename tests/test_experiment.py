@@ -10,31 +10,19 @@ from rnn_bptt_vs_eggroll.experiment import (
 )
 
 
-def test_curriculum_waits_for_both_models() -> None:
+def test_curriculum_advances_after_one_passing_probe() -> None:
     config = replace(
-        smoke_config(),
-        curriculum_delays=(0, 4),
-        curriculum_accuracy_threshold=0.75,
+        smoke_config(), curriculum_delays=(0, 4), curriculum_accuracy_threshold=0.75,
     )
     state = CurriculumState()
-    assert update_curriculum(
-        state,
-        {"bptt": 0.8, "eggroll": 0.7},
-        config,
-        generation=1,
-    ) is None
-    transition = update_curriculum(
-        state,
-        {"bptt": 0.9, "eggroll": 0.8},
-        config,
-        generation=2,
-    )
+    assert update_curriculum(state, 0.7, config, generation=1) is None
+    transition = update_curriculum(state, 0.8, config, generation=2,)
     assert transition is not None
     assert state.current_max_delay(config) == 4
 
 
 def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
-    config = replace(
+    base_config = replace(
         smoke_config(seed=13),
         generations=2,
         evaluation_interval=1,
@@ -49,19 +37,33 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
         curriculum_accuracy_threshold=0.0,
         curriculum_probe_examples=4,
     )
-    results = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
-    assert results is not None
-    assert results["model"]["initial_checksums"]["bptt"] == results["model"][
-        "initial_checksums"
-    ]["eggroll"]
-    assert results["budgets"]["unique_training_sequences"] == 16
-    assert results["budgets"]["eggroll_candidate_forward_sequences"] == 64
-    assert len(results["test"]["grid"]) == 6
-    transitions = results["curriculum"]["transitions"]
-    assert len(transitions) == 1
-    assert transitions[0]["generation"] == 1
-    assert transitions[0]["from_max_delay"] == 0
-    assert transitions[0]["to_max_delay"] == 4
-    assert (tmp_path / "metrics.json").is_file()
-    assert (tmp_path / "bptt.pt").is_file()
-    assert (tmp_path / "eggroll.pt").is_file()
+    results = {}
+    for method in ("bptt", "eggroll"):
+        output_dir = tmp_path / method
+        result = run_experiment(
+            output_dir,
+            device=torch.device("cpu"),
+            config=replace(base_config, method=method),
+        )
+        assert result is not None
+        results[method] = result
+        assert result["method"] == method
+        assert result["budgets"]["unique_training_sequences"] == 16
+        expected_candidate_forwards = 64 if method == "eggroll" else 0
+        assert (
+            result["budgets"]["eggroll_candidate_forward_sequences"]
+            == expected_candidate_forwards
+        )
+        assert len(result["test"]["grid"]) == 3
+        transitions = result["curriculum"]["transitions"]
+        assert len(transitions) == 1
+        assert transitions[0]["generation"] == 1
+        assert transitions[0]["from_max_delay"] == 0
+        assert transitions[0]["to_max_delay"] == 4
+        assert (output_dir / "metrics.json").is_file()
+        assert (output_dir / "model.pt").is_file()
+
+    assert (
+        results["bptt"]["model"]["initial_checksum"]
+        == results["eggroll"]["model"]["initial_checksum"]
+    )

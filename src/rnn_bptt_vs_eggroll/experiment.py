@@ -1,9 +1,8 @@
-"""Run a paired BPTT versus forward-only EGGROLL memory experiment."""
+"""Train one RNN with BPTT or forward-only EGGROLL on associative recall."""
 
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 import math
@@ -32,6 +31,7 @@ from .task import AssociativeRecallConfig, sample_batch
 
 @dataclass(frozen=True)
 class ExperimentConfig:
+    method: str = "bptt"
     seed: int = 7
     generations: int = 3_000
     batch_size: int = 256
@@ -43,7 +43,6 @@ class ExperimentConfig:
     curriculum_accuracy_threshold: float = 0.9
     curriculum_frontier_probability: float = 0.5
     curriculum_probe_examples: int = 512
-    curriculum_gate: str = "all"
     evaluation_pairs: tuple[int, ...] = (1, 2, 4)
     evaluation_delays: tuple[int, ...] = (0, 2, 4, 8, 16, 32, 64, 128, 256)
     evaluation_examples: int = 1_024
@@ -72,6 +71,8 @@ class ExperimentConfig:
     log_progress: bool = False
 
     def __post_init__(self) -> None:
+        if self.method not in {"bptt", "eggroll"}:
+            raise ValueError("method must be 'bptt' or 'eggroll'")
         if self.generations < 1 or self.batch_size < 1:
             raise ValueError("generations and batch_size must be positive")
         if self.train_num_pairs < 1:
@@ -93,8 +94,6 @@ class ExperimentConfig:
             raise ValueError("curriculum_frontier_probability must be in [0, 1]")
         if self.curriculum_probe_examples < 1:
             raise ValueError("curriculum_probe_examples must be positive")
-        if self.curriculum_gate not in {"all", "mean", "bptt", "eggroll"}:
-            raise ValueError("unknown curriculum_gate")
         if not self.evaluation_pairs or min(self.evaluation_pairs) < 1:
             raise ValueError("evaluation_pairs must be non-empty and positive")
         if tuple(sorted(set(self.evaluation_pairs))) != self.evaluation_pairs:
@@ -207,10 +206,7 @@ def _broadcast_model(model: VanillaRNN) -> None:
         dist.broadcast(value, src=0)
 
 
-def _broadcast_curriculum_state(
-    state: CurriculumState,
-    device: torch.device,
-) -> None:
+def _broadcast_curriculum_state(state: CurriculumState, device: torch.device,) -> None:
     if not dist.is_initialized():
         return
     values = torch.tensor([state.stage], device=device, dtype=torch.long)
@@ -248,7 +244,10 @@ def _state_checksum(model: VanillaRNN) -> str:
 def _parameter_l2_norm(model: VanillaRNN) -> float:
     return float(
         torch.sqrt(
-            sum(parameter.detach().float().square().sum() for parameter in model.parameters())
+            sum(
+                parameter.detach().float().square().sum()
+                for parameter in model.parameters()
+            )
         )
     )
 
@@ -263,10 +262,7 @@ def _model_gradient_rms(model: VanillaRNN) -> float:
 
 
 def _sample_training_delay(
-    config: ExperimentConfig,
-    state: CurriculumState,
-    *,
-    generator: torch.Generator,
+    config: ExperimentConfig, state: CurriculumState, *, generator: torch.Generator,
 ) -> int:
     """Sample uniformly below the frontier, with explicit frontier rehearsal."""
 
@@ -281,30 +277,13 @@ def _sample_training_delay(
     # is spread over previously introduced delays.
     upper_bound = frontier if config.curriculum_enabled else frontier + 1
     return int(
-        torch.randint(
-            config.train_min_delay,
-            upper_bound,
-            (1,),
-            generator=generator,
-        )
+        torch.randint(config.train_min_delay, upper_bound, (1,), generator=generator,)
     )
-
-
-def _curriculum_gate_passes(
-    accuracies: dict[str, float],
-    config: ExperimentConfig,
-) -> bool:
-    threshold = config.curriculum_accuracy_threshold
-    if config.curriculum_gate == "all":
-        return all(value >= threshold for value in accuracies.values())
-    if config.curriculum_gate == "mean":
-        return sum(accuracies.values()) / len(accuracies) >= threshold
-    return accuracies[config.curriculum_gate] >= threshold
 
 
 def update_curriculum(
     state: CurriculumState,
-    accuracies: dict[str, float],
+    accuracy: float,
     config: ExperimentConfig,
     *,
     generation: int,
@@ -313,7 +292,7 @@ def update_curriculum(
 
     if not config.curriculum_enabled:
         return None
-    if not _curriculum_gate_passes(accuracies, config):
+    if accuracy < config.curriculum_accuracy_threshold:
         return None
     if state.stage == len(config.curriculum_delays) - 1:
         return None
@@ -323,9 +302,8 @@ def update_curriculum(
         "generation": generation,
         "from_max_delay": previous_delay,
         "to_max_delay": config.curriculum_delays[state.stage],
-        "frontier_accuracies": accuracies,
+        "frontier_accuracy": accuracy,
         "threshold": config.curriculum_accuracy_threshold,
-        "gate": config.curriculum_gate,
     }
     state.transitions.append(transition)
     return transition
@@ -371,10 +349,7 @@ def _eggroll_update(
     noise_generator: torch.Generator,
 ) -> dict[str, float]:
     noise = sample_antithetic_noise(
-        model,
-        local_population_size,
-        perturbation_rank,
-        generator=noise_generator,
+        model, local_population_size, perturbation_rank, generator=noise_generator,
     )
     model.eval()
     with torch.no_grad():
@@ -401,8 +376,7 @@ def _eggroll_update(
         # This is the update scaling used by the working spiral implementation.
         gradient_scale = sigma * math.sqrt(global_population_size)
         reward_gradients = {
-            name: value * gradient_scale
-            for name, value in raw_reward_gradients.items()
+            name: value * gradient_scale for name, value in raw_reward_gradients.items()
         }
         mean_logits = model(inputs)
         assert isinstance(mean_logits, Tensor)
@@ -451,28 +425,20 @@ def evaluate_grid(
         raise ValueError("split must be validation or test")
     rows: list[dict[str, Any]] = []
     pairs = config.evaluation_pairs if evaluation_pairs is None else evaluation_pairs
-    delays = config.evaluation_delays if evaluation_delays is None else evaluation_delays
+    delays = (
+        config.evaluation_delays if evaluation_delays is None else evaluation_delays
+    )
     for num_pairs in pairs:
         for delay in delays:
             generator = torch.Generator().manual_seed(
                 _evaluation_seed(config.seed, split, num_pairs, delay)
             )
-            totals = {
-                name: {"loss": 0.0, "correct": 0}
-                for name in models
-            }
+            totals = {name: {"loss": 0.0, "correct": 0} for name in models}
             seen = 0
             while seen < example_count:
-                current_size = min(
-                    config.evaluation_batch_size,
-                    example_count - seen,
-                )
+                current_size = min(config.evaluation_batch_size, example_count - seen,)
                 batch = sample_batch(
-                    current_size,
-                    num_pairs,
-                    delay,
-                    task_config,
-                    generator=generator,
+                    current_size, num_pairs, delay, task_config, generator=generator,
                 ).to(device)
                 for name, model in models.items():
                     model.eval()
@@ -508,7 +474,7 @@ def summarize_grid(
     if trained_max_delay is None:
         trained_max_delay = config.train_max_delay
     summaries: dict[str, dict[str, float | None]] = {}
-    for method in ("bptt", "eggroll"):
+    for method in sorted({row["method"] for row in rows}):
         method_rows = [row for row in rows if row["method"] == method]
         in_distribution = [
             row["accuracy"]
@@ -524,34 +490,31 @@ def summarize_grid(
         ]
         summaries[method] = {
             "in_distribution_accuracy_mean": (
-                sum(in_distribution) / len(in_distribution)
-                if in_distribution
-                else None
+                sum(in_distribution) / len(in_distribution) if in_distribution else None
             ),
             "delay_extrapolation_accuracy_mean": (
-                sum(extrapolation) / len(extrapolation)
-                if extrapolation
-                else None
+                sum(extrapolation) / len(extrapolation) if extrapolation else None
             ),
         }
     return summaries
 
 
 def run_experiment(
-    output_dir: Path,
-    *,
-    device: torch.device,
-    config: ExperimentConfig,
+    output_dir: Path, *, device: torch.device, config: ExperimentConfig,
 ) -> dict[str, Any] | None:
-    """Train paired models and save complete reproducibility metadata on rank 0."""
+    """Train one method with its own persistent delay curriculum."""
 
     world_size = _world_size()
     rank = _rank()
-    if config.population_size % world_size:
-        raise ValueError("population_size must be divisible by the worker count")
-    local_population_size = config.population_size // world_size
-    if local_population_size < 2 or local_population_size % 2:
-        raise ValueError("each worker needs a positive even population shard")
+    if config.method == "bptt" and world_size != 1:
+        raise ValueError("BPTT runs use one process; torchrun is only for EGGROLL")
+    local_population_size = 0
+    if config.method == "eggroll":
+        if config.population_size % world_size:
+            raise ValueError("population_size must be divisible by the worker count")
+        local_population_size = config.population_size // world_size
+        if local_population_size < 2 or local_population_size % 2:
+            raise ValueError("each worker needs a positive even population shard")
     if _is_primary():
         output_dir.mkdir(parents=True, exist_ok=True)
     if dist.is_initialized():
@@ -563,35 +526,28 @@ def run_experiment(
         distractor_std=config.distractor_std,
     )
     torch.manual_seed(config.seed)
-    base_model = VanillaRNN(
+    model = VanillaRNN(
         task_config.input_size,
         config.hidden_size,
         task_config.num_values,
         recurrent_radius=config.recurrent_radius,
     ).to(device)
-    _broadcast_model(base_model)
-    models = {
-        "bptt": copy.deepcopy(base_model),
-        "eggroll": copy.deepcopy(base_model),
-    }
-    del base_model
-    initial_checksums = {name: _state_checksum(model) for name, model in models.items()}
-    if len(set(initial_checksums.values())) != 1:
-        raise RuntimeError("paired models did not receive identical parameters")
+    _broadcast_model(model)
+    initial_checksum = _state_checksum(model)
 
-    optimizers = {
-        "bptt": torch.optim.AdamW(
-            models["bptt"].parameters(),
+    if config.method == "bptt":
+        optimizer: torch.optim.Optimizer = torch.optim.AdamW(
+            model.parameters(),
             lr=config.bptt_learning_rate,
             weight_decay=config.bptt_weight_decay,
-        ),
-        "eggroll": torch.optim.SGD(
-            models["eggroll"].parameters(),
+        )
+    else:
+        optimizer = torch.optim.SGD(
+            model.parameters(),
             lr=config.eggroll_learning_rate,
             momentum=config.eggroll_momentum,
             weight_decay=config.eggroll_weight_decay,
-        ),
-    }
+        )
     data_generator = torch.Generator().manual_seed(config.seed + 30_001)
     delay_generator = torch.Generator().manual_seed(config.seed + 40_001)
     generator_device = device if device.type != "mps" else torch.device("cpu")
@@ -600,7 +556,7 @@ def run_experiment(
 
     validation_history: list[dict[str, Any]] = []
     update_history: list[dict[str, Any]] = []
-    method_seconds = {"bptt": 0.0, "eggroll": 0.0}
+    method_seconds = 0.0
     curriculum_state = CurriculumState()
     last_training_frontier = curriculum_state.current_max_delay(config)
 
@@ -608,7 +564,7 @@ def run_experiment(
         frontier_before_probe = curriculum_state.current_max_delay(config)
         if _is_primary():
             grid = evaluate_grid(
-                models,
+                {config.method: model},
                 task_config,
                 config,
                 split="validation",
@@ -623,7 +579,7 @@ def run_experiment(
             transition = None
             if config.curriculum_enabled:
                 probe_grid = evaluate_grid(
-                    models,
+                    {config.method: model},
                     task_config,
                     config,
                     split="validation",
@@ -632,20 +588,15 @@ def run_experiment(
                     evaluation_pairs=(config.train_num_pairs,),
                     evaluation_delays=(frontier_before_probe,),
                 )
-                probe_accuracies = {
-                    row["method"]: row["accuracy"] for row in probe_grid
-                }
+                probe_accuracy = probe_grid[0]["accuracy"]
                 if allow_curriculum_advance:
                     transition = update_curriculum(
-                        curriculum_state,
-                        probe_accuracies,
-                        config,
-                        generation=step,
+                        curriculum_state, probe_accuracy, config, generation=step,
                     )
                 curriculum_metrics.update(
                     {
                         "probe_examples": config.curriculum_probe_examples,
-                        "frontier_accuracies": probe_accuracies,
+                        "frontier_accuracy": probe_accuracy,
                         "transition": transition,
                         "stage_after_probe": curriculum_state.stage,
                         "max_delay_after_probe": (
@@ -656,15 +607,11 @@ def run_experiment(
             entry = {
                 "step": step,
                 "summary": summarize_grid(
-                    grid,
-                    config,
-                    trained_max_delay=frontier_before_probe,
+                    grid, config, trained_max_delay=frontier_before_probe,
                 ),
                 "grid": grid,
                 "curriculum": curriculum_metrics,
-                "parameter_l2_norm": {
-                    name: _parameter_l2_norm(model) for name, model in models.items()
-                },
+                "parameter_l2_norm": _parameter_l2_norm(model),
             }
             validation_history.append(entry)
             if config.log_progress:
@@ -687,9 +634,7 @@ def run_experiment(
         training_frontier = curriculum_state.current_max_delay(config)
         last_training_frontier = training_frontier
         delay = _sample_training_delay(
-            config,
-            curriculum_state,
-            generator=delay_generator,
+            config, curriculum_state, generator=delay_generator,
         )
         batch = sample_batch(
             config.batch_size,
@@ -701,34 +646,31 @@ def run_experiment(
 
         _synchronize(device)
         start = time.perf_counter()
-        eggroll_metrics = _eggroll_update(
-            models["eggroll"],
-            optimizers["eggroll"],
-            batch.inputs,
-            batch.targets,
-            local_population_size=local_population_size,
-            global_population_size=config.population_size,
-            candidate_chunk_size=config.population_chunk_size,
-            perturbation_rank=config.perturbation_rank,
-            sigma=current_sigma,
-            fitness_shaping=config.fitness_shaping,
-            noise_generator=noise_generator,
-        )
+        if config.method == "eggroll":
+            method_metrics = _eggroll_update(
+                model,
+                optimizer,
+                batch.inputs,
+                batch.targets,
+                local_population_size=local_population_size,
+                global_population_size=config.population_size,
+                candidate_chunk_size=config.population_chunk_size,
+                perturbation_rank=config.perturbation_rank,
+                sigma=current_sigma,
+                fitness_shaping=config.fitness_shaping,
+                noise_generator=noise_generator,
+            )
+        else:
+            method_metrics = _bptt_update(
+                model,
+                optimizer,
+                batch.inputs,
+                batch.targets,
+                gradient_clip=config.bptt_gradient_clip,
+            )
         _synchronize(device)
-        eggroll_seconds = time.perf_counter() - start
-        method_seconds["eggroll"] += eggroll_seconds
-
-        start = time.perf_counter()
-        bptt_metrics = _bptt_update(
-            models["bptt"],
-            optimizers["bptt"],
-            batch.inputs,
-            batch.targets,
-            gradient_clip=config.bptt_gradient_clip,
-        )
-        _synchronize(device)
-        bptt_seconds = time.perf_counter() - start
-        method_seconds["bptt"] += bptt_seconds
+        update_seconds = time.perf_counter() - start
+        method_seconds += update_seconds
 
         should_record = (
             generation == 1
@@ -742,24 +684,26 @@ def run_experiment(
                 "curriculum_stage": curriculum_state.stage,
                 "curriculum_max_delay": training_frontier,
                 "unique_training_sequences_seen": generation * config.batch_size,
-                "sigma": current_sigma,
-                "learning_rates": {
-                    name: optimizer.param_groups[0]["lr"]
-                    for name, optimizer in optimizers.items()
-                },
-                "eggroll": {**eggroll_metrics, "seconds": eggroll_seconds},
-                "bptt": {**bptt_metrics, "seconds": bptt_seconds},
+                "learning_rate": optimizer.param_groups[0]["lr"],
+                "method": config.method,
+                "metrics": {**method_metrics, "seconds": update_seconds},
             }
+            if config.method == "eggroll":
+                update_entry["sigma"] = current_sigma
             update_history.append(update_entry)
             if config.log_progress:
                 print(json.dumps({"update": update_entry}), flush=True)
 
         current_sigma *= config.sigma_decay
-        optimizers["eggroll"].param_groups[0]["lr"] *= (
+        optimizer.param_groups[0]["lr"] *= (
             config.eggroll_learning_rate_decay
+            if config.method == "eggroll"
+            else config.bptt_learning_rate_decay
         )
-        optimizers["bptt"].param_groups[0]["lr"] *= config.bptt_learning_rate_decay
-        if generation % config.evaluation_interval == 0 or generation == config.generations:
+        if (
+            generation % config.evaluation_interval == 0
+            or generation == config.generations
+        ):
             record(generation, allow_curriculum_advance=True)
 
     _synchronize(device)
@@ -770,7 +714,7 @@ def run_experiment(
         return None
 
     test_grid = evaluate_grid(
-        models,
+        {config.method: model},
         task_config,
         config,
         split="test",
@@ -778,31 +722,38 @@ def run_experiment(
         device=device,
     )
     results: dict[str, Any] = {
-        "experiment": "bptt_vs_forward_eggroll_associative_recall",
+        "experiment": "single_method_associative_recall_memory_horizon",
+        "method": config.method,
         "config": asdict(config),
         "model": {
             "architecture": "single_layer_tanh_elman_rnn",
             "input_size": task_config.input_size,
             "hidden_size": config.hidden_size,
             "output_size": task_config.num_values,
-            "parameter_count": models["bptt"].parameter_count,
-            "initial_checksums": initial_checksums,
+            "parameter_count": model.parameter_count,
+            "initial_checksum": initial_checksum,
         },
         "distributed": {
             "world_size": world_size,
-            "global_population": config.population_size,
-            "population_per_worker": local_population_size,
+            "global_population": (
+                config.population_size if config.method == "eggroll" else None
+            ),
+            "population_per_worker": (
+                local_population_size if config.method == "eggroll" else None
+            ),
         },
         "budgets": {
             "unique_training_sequences": config.generations * config.batch_size,
-            "bptt_training_sequences": config.generations * config.batch_size,
+            "training_sequences": config.generations * config.batch_size,
             "eggroll_candidate_forward_sequences": (
                 config.generations * config.batch_size * config.population_size
+                if config.method == "eggroll"
+                else 0
             ),
         },
         "timing_seconds": {
             "experiment": experiment_seconds,
-            **method_seconds,
+            "training": method_seconds,
         },
         "validation_history": validation_history,
         "update_history": update_history,
@@ -815,22 +766,16 @@ def run_experiment(
         },
         "test": {
             "summary": summarize_grid(
-                test_grid,
-                config,
-                trained_max_delay=last_training_frontier,
+                test_grid, config, trained_max_delay=last_training_frontier,
             ),
             "grid": test_grid,
         },
-        "final_parameter_l2_norm": {
-            name: _parameter_l2_norm(model) for name, model in models.items()
-        },
+        "final_parameter_l2_norm": _parameter_l2_norm(model),
     }
     (output_dir / "metrics.json").write_text(
-        json.dumps(results, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+        json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8",
     )
-    for name, model in models.items():
-        torch.save(model.state_dict(), output_dir / f"{name}.pt")
+    torch.save(model.state_dict(), output_dir / "model.pt")
     if dist.is_initialized():
         dist.barrier()
     return results
@@ -845,6 +790,7 @@ def _parse_int_tuple(value: str) -> tuple[int, ...]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--method", choices=("bptt", "eggroll"), required=True)
     parser.add_argument("--preset", choices=("smoke", "reference"), default="smoke")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/smoke"))
     parser.add_argument("--device", default="auto")
@@ -854,43 +800,53 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--population-size", type=int)
     parser.add_argument("--population-chunk-size", type=int)
     parser.add_argument("--hidden-size", type=int)
+    parser.add_argument("--recurrent-radius", type=float)
     parser.add_argument("--train-num-pairs", type=int)
     parser.add_argument("--train-min-delay", type=int)
     parser.add_argument("--train-max-delay", type=int)
     parser.add_argument(
-        "--curriculum",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        "--curriculum", action=argparse.BooleanOptionalAction, default=None,
     )
     parser.add_argument("--curriculum-delays", type=_parse_int_tuple)
     parser.add_argument("--curriculum-accuracy-threshold", type=float)
     parser.add_argument("--curriculum-frontier-probability", type=float)
     parser.add_argument("--curriculum-probe-examples", type=int)
-    parser.add_argument(
-        "--curriculum-gate",
-        choices=("all", "mean", "bptt", "eggroll"),
-    )
     parser.add_argument("--evaluation-pairs", type=_parse_int_tuple)
     parser.add_argument("--evaluation-delays", type=_parse_int_tuple)
     parser.add_argument("--evaluation-examples", type=int)
     parser.add_argument("--test-examples", type=int)
     parser.add_argument("--evaluation-interval", type=int)
     parser.add_argument("--sigma", type=float)
+    parser.add_argument("--sigma-decay", type=float)
+    parser.add_argument("--perturbation-rank", type=int)
+    parser.add_argument(
+        "--fitness-shaping", choices=("zscore", "centered-rank", "centered"),
+    )
     parser.add_argument("--eggroll-learning-rate", type=float)
+    parser.add_argument("--eggroll-learning-rate-decay", type=float)
+    parser.add_argument("--eggroll-weight-decay", type=float)
+    parser.add_argument("--eggroll-momentum", type=float)
     parser.add_argument("--bptt-learning-rate", type=float)
+    parser.add_argument("--bptt-learning-rate-decay", type=float)
+    parser.add_argument("--bptt-weight-decay", type=float)
+    parser.add_argument("--bptt-gradient-clip", type=float)
     parser.add_argument("--distractor-std", type=float)
     parser.add_argument("--log-progress", action="store_true")
     return parser
 
 
-def _apply_cli_overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
+def _apply_cli_overrides(
+    config: ExperimentConfig, args: argparse.Namespace
+) -> ExperimentConfig:
     names = (
+        "method",
         "seed",
         "generations",
         "batch_size",
         "population_size",
         "population_chunk_size",
         "hidden_size",
+        "recurrent_radius",
         "train_num_pairs",
         "train_min_delay",
         "train_max_delay",
@@ -898,21 +854,27 @@ def _apply_cli_overrides(config: ExperimentConfig, args: argparse.Namespace) -> 
         "curriculum_accuracy_threshold",
         "curriculum_frontier_probability",
         "curriculum_probe_examples",
-        "curriculum_gate",
         "evaluation_pairs",
         "evaluation_delays",
         "evaluation_examples",
         "test_examples",
         "evaluation_interval",
         "sigma",
+        "sigma_decay",
+        "perturbation_rank",
+        "fitness_shaping",
         "eggroll_learning_rate",
+        "eggroll_learning_rate_decay",
+        "eggroll_weight_decay",
+        "eggroll_momentum",
         "bptt_learning_rate",
+        "bptt_learning_rate_decay",
+        "bptt_weight_decay",
+        "bptt_gradient_clip",
         "distractor_std",
     )
     overrides = {
-        name: getattr(args, name)
-        for name in names
-        if getattr(args, name) is not None
+        name: getattr(args, name) for name in names if getattr(args, name) is not None
     }
     if args.curriculum is not None:
         overrides["curriculum_enabled"] = args.curriculum
@@ -925,6 +887,8 @@ def main() -> None:
     config = smoke_config() if args.preset == "smoke" else ExperimentConfig()
     config = _apply_cli_overrides(config, args)
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1 and config.method != "eggroll":
+        raise RuntimeError("torchrun is only supported for EGGROLL runs")
     if world_size > 1:
         local_rank = int(os.environ["LOCAL_RANK"])
         if not torch.cuda.is_available():
