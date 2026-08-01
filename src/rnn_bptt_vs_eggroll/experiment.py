@@ -53,6 +53,7 @@ class ExperimentConfig:
     test_examples: int = 4_096
     evaluation_batch_size: int = 256
     evaluation_interval: int = 250
+    log_interval: int = 1
     vocab_size: int = 8_192
     query_power_a: float = 0.01
     random_non_queries: bool = False
@@ -124,6 +125,7 @@ class ExperimentConfig:
             self.test_examples,
             self.evaluation_batch_size,
             self.evaluation_interval,
+            self.log_interval,
             self.hidden_size,
         )
         if any(value < 1 for value in counts):
@@ -803,12 +805,12 @@ def run_experiment(
         update_seconds = time.perf_counter() - start
         method_seconds += update_seconds
 
-        should_record = (
+        should_log_update = (
             generation == 1
-            or generation % config.evaluation_interval == 0
+            or generation % config.log_interval == 0
             or generation == config.generations
         )
-        if should_record and _is_primary():
+        if should_log_update and _is_primary():
             update_entry = {
                 "generation": generation,
                 "sampled_stage": sampled_stage,
@@ -957,6 +959,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--evaluation-examples", type=int)
     parser.add_argument("--test-examples", type=int)
     parser.add_argument("--evaluation-interval", type=int)
+    parser.add_argument("--log-interval", type=int)
     parser.add_argument("--sigma", type=float)
     parser.add_argument("--sigma-decay", type=float)
     parser.add_argument("--perturbation-rank", type=int)
@@ -1005,6 +1008,7 @@ def _apply_cli_overrides(
         "evaluation_examples",
         "test_examples",
         "evaluation_interval",
+        "log_interval",
         "sigma",
         "sigma_decay",
         "perturbation_rank",

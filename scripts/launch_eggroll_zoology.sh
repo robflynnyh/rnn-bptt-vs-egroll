@@ -27,6 +27,7 @@ python -u -m rnn_bptt_vs_eggroll.experiment \
     --curriculum-num-kv-pairs 1,2,4,8,16,32,64 \
     --curriculum-frontier-probability 1.0 \
     --evaluation-interval 100 \
+    --log-interval 1 \
     --evaluation-examples 512 \
     --curriculum-probe-examples 512 \
     --test-examples 4096 \

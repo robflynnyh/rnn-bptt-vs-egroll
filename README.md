@@ -64,6 +64,8 @@ rnn-memory-compare \
 
 `--no-curriculum` trains only the final configured stage. Every validation
 probe and transition is recorded in `metrics.json` and W&B.
+Training metrics log independently every generation by default; use
+`--log-interval` to reduce their frequency without changing validation.
 
 ## Methods
 

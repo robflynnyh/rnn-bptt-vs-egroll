@@ -106,8 +106,9 @@ def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
     config = replace(
         smoke_config(seed=17),
         method="bptt",
-        generations=1,
-        evaluation_interval=1,
+        generations=2,
+        evaluation_interval=2,
+        log_interval=1,
         evaluation_examples=4,
         test_examples=4,
         curriculum_probe_examples=4,
@@ -124,6 +125,7 @@ def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
     assert "curriculum/frontier_accuracy" in logged_keys
     assert "validation_grid/seq_len_8/kv_pairs_1/accuracy" in logged_keys
     assert "test_grid/seq_len_8/kv_pairs_1/accuracy" in logged_keys
+    assert sum("train/batch_loss" in row for row in fake_wandb.run.logged) == 2
     assert {path.rsplit("/", 1)[-1] for path, _ in fake_wandb.run.saved} == {
         "metrics.json",
         "model.pt",
