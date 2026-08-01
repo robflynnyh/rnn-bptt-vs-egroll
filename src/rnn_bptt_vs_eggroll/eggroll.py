@@ -105,18 +105,24 @@ def _population_affine(
     right = _repeated_pair(factors.right)
     base = F.linear(inputs, weight, bias)
     if inputs.ndim == 2:
-        base = base.unsqueeze(0).expand(noise.population_size, -1, -1)
+        outputs = base.unsqueeze(0).expand(noise.population_size, -1, -1).clone()
         projected = torch.einsum("bi,pir->pbr", inputs, right)
     elif inputs.ndim == 3:
+        outputs = base
         projected = torch.einsum("pbi,pir->pbr", inputs, right)
     else:
         raise ValueError("population affine input must be [B, D] or [P, B, D]")
-    perturbation = torch.einsum("pbr,por->pbo", projected, left)
-    outputs = perturbation.mul_(sigma / math.sqrt(noise.rank)).add_(base)
+    scale = sigma / math.sqrt(noise.rank)
+    for rank_index in range(noise.rank):
+        outputs.addcmul_(
+            projected[:, :, rank_index, None],
+            left[:, None, :, rank_index],
+            value=scale,
+        )
     if bias is not None:
         if bias_name is None:
             raise ValueError("bias_name is required when a bias is provided")
-        outputs.add_(sigma * _signed_pair(noise.vectors[bias_name])[:, None])
+        outputs.add_(_signed_pair(noise.vectors[bias_name])[:, None], alpha=sigma)
     return outputs
 
 
@@ -136,8 +142,15 @@ def _population_embedding(
     right = _repeated_pair(factors.right)
     base = F.embedding(token_ids, weight.transpose(0, 1))
     selected_right = right[:, token_ids, :]
-    perturbation = torch.einsum("pbr,phr->pbh", selected_right, left)
-    return base.unsqueeze(0) + (sigma / math.sqrt(noise.rank)) * perturbation
+    outputs = base.unsqueeze(0).expand(noise.population_size, -1, -1).clone()
+    scale = sigma / math.sqrt(noise.rank)
+    for rank_index in range(noise.rank):
+        outputs.addcmul_(
+            selected_right[:, :, rank_index, None],
+            left[:, None, :, rank_index],
+            value=scale,
+        )
+    return outputs
 
 
 @torch.no_grad()
@@ -219,6 +232,31 @@ def slice_pair_noise(noise: AntitheticNoise, start: int, end: int) -> Antithetic
     )
 
 
+def _population_readout_sums(
+    model: VanillaRNN,
+    states: Tensor,
+    targets: Tensor,
+    noise: AntitheticNoise,
+    sigma: float,
+) -> tuple[Tensor, Tensor]:
+    logits = _population_affine(
+        states,
+        model.output_weight,
+        "output_weight",
+        noise,
+        sigma,
+        bias=model.output_bias,
+        bias_name="output_bias",
+    )
+    target_logits = logits.gather(
+        -1,
+        targets[None, :, None].expand(noise.population_size, -1, 1),
+    ).squeeze(-1)
+    losses = (torch.logsumexp(logits, dim=-1) - target_logits).sum(dim=-1)
+    correct = logits.argmax(dim=-1).eq(targets).sum(dim=-1)
+    return losses, correct
+
+
 @torch.no_grad()
 def _population_loss_and_accuracy(
     model: VanillaRNN,
@@ -235,6 +273,22 @@ def _population_loss_and_accuracy(
     loss_sums = model.input_weight.new_zeros(noise.population_size)
     correct_counts = model.input_weight.new_zeros(noise.population_size)
     supervised_count = 0
+    buffered_count = 0
+    buffered_states: list[Tensor] = []
+    buffered_targets: list[Tensor] = []
+
+    def flush_readouts() -> None:
+        nonlocal buffered_count, loss_sums, correct_counts
+        states = torch.cat(buffered_states, dim=1)
+        selected_targets = torch.cat(buffered_targets)
+        losses, correct = _population_readout_sums(
+            model, states, selected_targets, noise, sigma,
+        )
+        loss_sums += losses
+        correct_counts += correct
+        buffered_states.clear()
+        buffered_targets.clear()
+        buffered_count = 0
 
     for time, token_ids in enumerate(inputs.unbind(dim=1)):
         input_term = _population_embedding(
@@ -255,25 +309,17 @@ def _population_loss_and_accuracy(
         if not selected.any():
             continue
         selected_targets = targets[:, time][selected]
-        logits = _population_affine(
-            hidden[:, selected],
-            model.output_weight,
-            "output_weight",
-            noise,
-            sigma,
-            bias=model.output_bias,
-            bias_name="output_bias",
-        )
-        target_logits = logits.gather(
-            -1,
-            selected_targets[None, :, None].expand(noise.population_size, -1, 1),
-        ).squeeze(-1)
-        loss_sums += (torch.logsumexp(logits, dim=-1) - target_logits).sum(dim=-1)
-        correct_counts += logits.argmax(dim=-1).eq(selected_targets).sum(dim=-1)
+        buffered_states.append(hidden[:, selected])
+        buffered_targets.append(selected_targets)
+        buffered_count += selected_targets.numel()
         supervised_count += selected_targets.numel()
+        if buffered_count >= 128:
+            flush_readouts()
 
     if supervised_count == 0:
         raise ValueError("targets must select at least one supervised position")
+    if buffered_count:
+        flush_readouts()
     return loss_sums / supervised_count, correct_counts / supervised_count
 
 

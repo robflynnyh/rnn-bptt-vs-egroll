@@ -140,7 +140,9 @@ torchrun --standalone --nproc_per_node=4 \
 The reference candidate chunk is 1,024. Candidate networks share the base
 weights and apply their rank-1 corrections in a batched population dimension;
 query losses are accumulated as each readout position is produced so the full
-population-by-query-by-vocabulary tensor is never retained.
+population-by-query-by-vocabulary tensor is never retained. Rank-1 corrections
+are fused into the base activations, and nearby query states share larger
+readout projections.
 
 ## Tracking
 

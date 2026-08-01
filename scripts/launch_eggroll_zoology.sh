@@ -7,7 +7,7 @@ cd "$repo_root"
 export PYTHONPATH=src
 mkdir -p .scratch artifacts/eggroll_zoology
 
-name=eggroll-zoology-p16384-b256-r1-seed7
+name=eggroll-zoology-p16384-b256-r1-optimized-seed7
 python -u -m rnn_bptt_vs_eggroll.experiment \
     --method eggroll \
     --preset reference \
