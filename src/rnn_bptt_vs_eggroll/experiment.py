@@ -68,6 +68,11 @@ class ExperimentConfig:
     bptt_learning_rate_decay: float = 1.0
     bptt_weight_decay: float = 1e-3
     bptt_gradient_clip: float = 1.0
+    wandb_enabled: bool = False
+    wandb_project: str = "rnn-bptt-vs-eggroll"
+    wandb_entity: str | None = "wobrob101"
+    wandb_run_name: str | None = None
+    wandb_group: str | None = None
     log_progress: bool = False
 
     def __post_init__(self) -> None:
@@ -141,6 +146,8 @@ class ExperimentConfig:
             raise ValueError("eggroll_momentum must be in [0, 1)")
         if self.bptt_gradient_clip <= 0:
             raise ValueError("bptt_gradient_clip must be positive")
+        if not self.wandb_project:
+            raise ValueError("wandb_project must be non-empty")
 
 
 def smoke_config(seed: int = 7) -> ExperimentConfig:
@@ -239,6 +246,100 @@ def _state_checksum(model: VanillaRNN) -> str:
         )
         digest.update(bytes(raw_bytes))
     return digest.hexdigest()
+
+
+def _initialize_wandb(config: ExperimentConfig, output_dir: Path,) -> Any | None:
+    if not config.wandb_enabled or not _is_primary():
+        return None
+    try:
+        import wandb
+    except ImportError as error:
+        raise RuntimeError("W&B tracking requires the 'wandb' package") from error
+    run = wandb.init(
+        project=config.wandb_project,
+        entity=config.wandb_entity,
+        name=config.wandb_run_name or output_dir.name,
+        group=config.wandb_group,
+        config=asdict(config),
+    )
+    run.define_metric("generation")
+    run.define_metric("*", step_metric="generation")
+    return run
+
+
+def _validation_wandb_metrics(entry: dict[str, Any], method: str,) -> dict[str, float]:
+    metrics: dict[str, float] = {
+        "generation": float(entry["step"]),
+        "model/parameter_l2_norm": entry["parameter_l2_norm"],
+    }
+    for name, value in entry["summary"][method].items():
+        if value is not None:
+            metrics[f"validation/{name}"] = value
+    curriculum = entry["curriculum"]
+    if curriculum["enabled"]:
+        metrics.update(
+            {
+                "curriculum/stage": float(curriculum["stage_after_probe"]),
+                "curriculum/max_delay": float(curriculum["max_delay_after_probe"]),
+                "curriculum/frontier_accuracy": curriculum["frontier_accuracy"],
+                "curriculum/advanced": float(curriculum["transition"] is not None),
+            }
+        )
+    for row in entry["grid"]:
+        prefix = f"validation_grid/pairs_{row['num_pairs']}" f"/delay_{row['delay']}"
+        metrics[f"{prefix}/accuracy"] = row["accuracy"]
+        metrics[f"{prefix}/loss"] = row["loss"]
+    return metrics
+
+
+def _update_wandb_metrics(entry: dict[str, Any]) -> dict[str, float]:
+    metrics = {
+        "generation": float(entry["generation"]),
+        "train/sampled_delay": float(entry["sampled_delay"]),
+        "train/curriculum_stage": float(entry["curriculum_stage"]),
+        "train/curriculum_max_delay": float(entry["curriculum_max_delay"]),
+        "train/unique_sequences_seen": float(entry["unique_training_sequences_seen"]),
+        "train/learning_rate": entry["learning_rate"],
+    }
+    if "sigma" in entry:
+        metrics["train/sigma"] = entry["sigma"]
+    metrics.update({f"train/{name}": value for name, value in entry["metrics"].items()})
+    return metrics
+
+
+def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
+    method = results["method"]
+    metrics: dict[str, float] = {
+        "generation": float(results["config"]["generations"]),
+        "timing/experiment_seconds": results["timing_seconds"]["experiment"],
+        "timing/training_seconds": results["timing_seconds"]["training"],
+        "curriculum/final_trained_max_delay": float(
+            results["curriculum"]["last_trained_max_delay"]
+        ),
+    }
+    for name, value in results["test"]["summary"][method].items():
+        if value is not None:
+            metrics[f"test/{name}"] = value
+    for row in results["test"]["grid"]:
+        prefix = f"test_grid/pairs_{row['num_pairs']}/delay_{row['delay']}"
+        metrics[f"{prefix}/accuracy"] = row["accuracy"]
+        metrics[f"{prefix}/loss"] = row["loss"]
+    return metrics
+
+
+def _finish_wandb(run: Any, output_dir: Path, results: dict[str, Any],) -> None:
+    final_metrics = _test_wandb_metrics(results)
+    run.log(final_metrics)
+    run.summary.update(
+        {key: value for key, value in final_metrics.items() if key != "generation"}
+    )
+    run.save(
+        str(output_dir / "metrics.json"), base_path=str(output_dir), policy="now",
+    )
+    run.save(
+        str(output_dir / "model.pt"), base_path=str(output_dir), policy="now",
+    )
+    run.finish()
 
 
 def _parameter_l2_norm(model: VanillaRNN) -> float:
@@ -519,6 +620,7 @@ def run_experiment(
         output_dir.mkdir(parents=True, exist_ok=True)
     if dist.is_initialized():
         dist.barrier()
+    wandb_run = _initialize_wandb(config, output_dir)
 
     task_config = AssociativeRecallConfig(
         num_keys=config.num_keys,
@@ -614,6 +716,8 @@ def run_experiment(
                 "parameter_l2_norm": _parameter_l2_norm(model),
             }
             validation_history.append(entry)
+            if wandb_run is not None:
+                wandb_run.log(_validation_wandb_metrics(entry, config.method))
             if config.log_progress:
                 print(
                     json.dumps(
@@ -691,6 +795,8 @@ def run_experiment(
             if config.method == "eggroll":
                 update_entry["sigma"] = current_sigma
             update_history.append(update_entry)
+            if wandb_run is not None:
+                wandb_run.log(_update_wandb_metrics(update_entry))
             if config.log_progress:
                 print(json.dumps({"update": update_entry}), flush=True)
 
@@ -776,6 +882,8 @@ def run_experiment(
         json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8",
     )
     torch.save(model.state_dict(), output_dir / "model.pt")
+    if wandb_run is not None:
+        _finish_wandb(wandb_run, output_dir, results)
     if dist.is_initialized():
         dist.barrier()
     return results
@@ -831,6 +939,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bptt-weight-decay", type=float)
     parser.add_argument("--bptt-gradient-clip", type=float)
     parser.add_argument("--distractor-std", type=float)
+    parser.add_argument("--wandb", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-entity")
+    parser.add_argument("--wandb-run-name")
+    parser.add_argument("--wandb-group")
     parser.add_argument("--log-progress", action="store_true")
     return parser
 
@@ -872,12 +985,18 @@ def _apply_cli_overrides(
         "bptt_weight_decay",
         "bptt_gradient_clip",
         "distractor_std",
+        "wandb_project",
+        "wandb_entity",
+        "wandb_run_name",
+        "wandb_group",
     )
     overrides = {
         name: getattr(args, name) for name in names if getattr(args, name) is not None
     }
     if args.curriculum is not None:
         overrides["curriculum_enabled"] = args.curriculum
+    if args.wandb is not None:
+        overrides["wandb_enabled"] = args.wandb
     overrides["log_progress"] = args.log_progress
     return replace(config, **overrides)
 

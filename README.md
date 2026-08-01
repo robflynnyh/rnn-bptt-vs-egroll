@@ -113,12 +113,18 @@ rnn-memory-compare \
   --method bptt \
   --preset reference \
   --output-dir artifacts/reference_bptt_seed7 \
+  --wandb \
+  --wandb-run-name reference-bptt-seed7 \
+  --wandb-group reference-seed7 \
   --log-progress
 
 rnn-memory-compare \
   --method eggroll \
   --preset reference \
   --output-dir artifacts/reference_eggroll_seed7 \
+  --wandb \
+  --wandb-run-name reference-eggroll-seed7 \
+  --wandb-group reference-seed7 \
   --log-progress
 ```
 
@@ -131,6 +137,9 @@ torchrun --standalone --nproc_per_node=4 \
   --method eggroll \
   --preset reference \
   --output-dir artifacts/reference_eggroll_seed7 \
+  --wandb \
+  --wandb-run-name reference-eggroll-seed7 \
+  --wandb-group reference-seed7 \
   --log-progress
 ```
 
@@ -138,6 +147,17 @@ The reference run is intentionally expensive: 12.58 billion candidate-sequence
 forwards before accounting for recurrent timesteps. Start with the smoke preset
 and a reduced population while checking whether the task and learning curves
 behave sensibly.
+
+### W&B tracking
+
+Research commands enable W&B under the
+[`rnn-bptt-vs-eggroll`](https://wandb.ai/wobrob101/rnn-bptt-vs-eggroll)
+project. Tracking includes optimizer diagnostics, sampled delays, curriculum
+frontiers and transitions, every validation-grid cell, the final test grid,
+timings, configuration, `metrics.json`, and `model.pt`. BPTT and EGGROLL use
+separate W&B runs; `--wandb-group` can group runs that belong to the same
+comparison. In distributed EGGROLL, only rank 0 initializes and uploads to
+W&B.
 
 ## Outputs
 

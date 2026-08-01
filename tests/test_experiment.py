@@ -1,4 +1,5 @@
 from dataclasses import replace
+import sys
 
 import torch
 
@@ -67,3 +68,63 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
         results["bptt"]["model"]["initial_checksum"]
         == results["eggroll"]["model"]["initial_checksum"]
     )
+
+
+def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
+    class FakeRun:
+        def __init__(self) -> None:
+            self.defined_metrics = []
+            self.logged = []
+            self.saved = []
+            self.summary = {}
+            self.finished = False
+
+        def define_metric(self, *args, **kwargs) -> None:
+            self.defined_metrics.append((args, kwargs))
+
+        def log(self, metrics) -> None:
+            self.logged.append(metrics)
+
+        def save(self, path, **kwargs) -> None:
+            self.saved.append((path, kwargs))
+
+        def finish(self) -> None:
+            self.finished = True
+
+    class FakeWandb:
+        def __init__(self) -> None:
+            self.run = FakeRun()
+            self.init_kwargs = None
+
+        def init(self, **kwargs):
+            self.init_kwargs = kwargs
+            return self.run
+
+    fake_wandb = FakeWandb()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    config = replace(
+        smoke_config(seed=17),
+        method="bptt",
+        generations=1,
+        evaluation_interval=1,
+        evaluation_examples=4,
+        test_examples=4,
+        curriculum_probe_examples=4,
+        wandb_enabled=True,
+        wandb_run_name="test-bptt",
+    )
+
+    result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
+
+    assert result is not None
+    assert fake_wandb.init_kwargs["config"]["method"] == "bptt"
+    logged_keys = {key for row in fake_wandb.run.logged for key in row}
+    assert "train/batch_loss" in logged_keys
+    assert "curriculum/frontier_accuracy" in logged_keys
+    assert "validation_grid/pairs_2/delay_0/accuracy" in logged_keys
+    assert "test_grid/pairs_2/delay_0/accuracy" in logged_keys
+    assert {path.rsplit("/", 1)[-1] for path, _ in fake_wandb.run.saved} == {
+        "metrics.json",
+        "model.pt",
+    }
+    assert fake_wandb.run.finished
