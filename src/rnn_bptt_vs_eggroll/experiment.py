@@ -67,7 +67,7 @@ class ExperimentConfig:
     fitness_shaping: str = "zscore"
     eggroll_learning_rate: float = 0.3
     eggroll_learning_rate_decay: float = 1.0
-    eggroll_weight_decay: float = 1e-3
+    eggroll_weight_decay: float = 0.0
     eggroll_momentum: float = 0.0
     bptt_learning_rate: float = 3e-3
     bptt_learning_rate_decay: float = 1.0

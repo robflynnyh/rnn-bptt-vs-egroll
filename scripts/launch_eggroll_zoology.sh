@@ -7,7 +7,7 @@ cd "$repo_root"
 export PYTHONPATH=src
 mkdir -p .scratch artifacts/eggroll_zoology
 
-name=eggroll-zoology-p16384-b256-r1-step-logs-seed7
+name=eggroll-zoology-p16384-b256-r1-no-wd-seed7
 python -u -m rnn_bptt_vs_eggroll.experiment \
     --method eggroll \
     --preset reference \
@@ -22,7 +22,7 @@ python -u -m rnn_bptt_vs_eggroll.experiment \
     --sigma 0.005 \
     --fitness-shaping zscore \
     --eggroll-learning-rate 0.3 \
-    --eggroll-weight-decay 0.001 \
+    --eggroll-weight-decay 0 \
     --curriculum-sequence-lengths 16,32,64,128,256,512,1024 \
     --curriculum-num-kv-pairs 1,2,4,8,16,32,64 \
     --curriculum-frontier-probability 1.0 \
