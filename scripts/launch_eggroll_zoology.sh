@@ -8,23 +8,23 @@ export PYTHONPATH=src
 mkdir -p .scratch artifacts/eggroll_zoology
 
 generations="${GENERATIONS:-300000}"
-name="eggroll-zoology-grouped-p8192-u8-bf16-lr1e-2-g${generations}-seed7"
+name="eggroll-zoology-cartesian-p8192-b64-bf16-lr3e-1-g${generations}-seed7"
 python -u -m rnn_bptt_vs_eggroll.experiment \
     --method eggroll \
     --preset reference \
     --device cuda \
     --seed 7 \
     --generations "$generations" \
-    --batch-size 8 \
+    --batch-size 64 \
     --hidden-size 64 \
     --population-size 8192 \
-    --population-chunk-size 8192 \
-    --population-data-mode grouped \
+    --population-chunk-size 1024 \
+    --population-data-mode cartesian \
     --population-precision bfloat16 \
     --perturbation-rank 1 \
     --sigma 0.005 \
     --fitness-shaping zscore \
-    --eggroll-learning-rate 0.01 \
+    --eggroll-learning-rate 0.3 \
     --eggroll-weight-decay 0 \
     --curriculum-sequence-lengths 16,32,64,128,256,512,1024 \
     --curriculum-num-kv-pairs 1,2,4,8,16,32,64 \

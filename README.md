@@ -139,9 +139,12 @@ rnn-memory-compare \
   --log-progress
 ```
 
-The tuned grouped EGGROLL launcher uses `P=8192`, 8 unique sequences, one full
-population chunk, BF16 candidate forwards, rank-1 perturbations, `sigma=0.005`,
-SGD learning rate `0.01`, and 300,000 generations by default:
+The long EGGROLL launcher takes its optimizer configuration from the successful
+progressive sparse-attention experiment in the companion research repository.
+It uses Cartesian `P=8192` by batch-64 evaluation, BF16 candidate forwards,
+rank-1 perturbations, `sigma=0.005`, standardized fitness, SGD learning rate
+`0.3`, no weight decay, and 300,000 generations by default. The population is
+processed in chunks of 1,024 so the configuration fits on one GPU:
 
 ```bash
 bash scripts/launch_eggroll_zoology.sh
@@ -162,13 +165,12 @@ torchrun --standalone --nproc_per_node=4 \
   --log-progress
 ```
 
-The Cartesian reference candidate chunk is 1,024; the grouped launcher uses a
-measured full-population chunk of 8,192. Candidate networks share the base
-weights and apply their rank-1 corrections in a batched population dimension.
-Grouped evaluation retains states only at timesteps containing a query and
-processes query readouts in bounded blocks, so it never retains the full
-population-by-query-by-vocabulary tensor. Rank-1 corrections are fused into the
-base activations.
+The Cartesian reference and long-run candidate chunk is 1,024. Candidate
+networks share the base weights and apply their rank-1 corrections in a batched
+population dimension. Grouped evaluation, available as a separate ablation,
+retains states only at timesteps containing a query and processes query
+readouts in bounded blocks. Rank-1 corrections are fused into the base
+activations.
 
 ## Tracking
 

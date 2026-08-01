@@ -276,7 +276,7 @@ def _population_readout_sums(
         sigma,
         bias=model.output_bias,
         bias_name="output_bias",
-    )
+    ).float()
     target_logits = logits.gather(
         -1,
         targets[None, :, None].expand(noise.population_size, -1, 1),
