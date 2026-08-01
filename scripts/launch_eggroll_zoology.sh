@@ -7,21 +7,23 @@ cd "$repo_root"
 export PYTHONPATH=src
 mkdir -p .scratch artifacts/eggroll_zoology
 
-name=eggroll-zoology-p16384-b256-r1-no-wd-seed7
+name=eggroll-zoology-grouped-p8192-u8-bf16-lr1e-2-seed7
 python -u -m rnn_bptt_vs_eggroll.experiment \
     --method eggroll \
     --preset reference \
     --device cuda \
     --seed 7 \
     --generations 3000 \
-    --batch-size 256 \
+    --batch-size 8 \
     --hidden-size 64 \
-    --population-size 16384 \
-    --population-chunk-size 1024 \
+    --population-size 8192 \
+    --population-chunk-size 8192 \
+    --population-data-mode grouped \
+    --population-precision bfloat16 \
     --perturbation-rank 1 \
     --sigma 0.005 \
     --fitness-shaping zscore \
-    --eggroll-learning-rate 0.3 \
+    --eggroll-learning-rate 0.01 \
     --eggroll-weight-decay 0 \
     --curriculum-sequence-lengths 16,32,64,128,256,512,1024 \
     --curriculum-num-kv-pairs 1,2,4,8,16,32,64 \

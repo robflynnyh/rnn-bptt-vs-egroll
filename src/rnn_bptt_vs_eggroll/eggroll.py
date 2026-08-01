@@ -132,6 +132,8 @@ def _population_embedding(
     weight_name: str,
     noise: AntitheticNoise,
     sigma: float,
+    *,
+    candidate_inputs: bool = False,
 ) -> Tensor:
     """Embed token IDs for every low-rank population member."""
 
@@ -141,15 +143,29 @@ def _population_embedding(
     left = _signed_pair(factors.left)
     right = _repeated_pair(factors.right)
     base = F.embedding(token_ids, weight.transpose(0, 1))
-    selected_right = right[:, token_ids, :]
-    outputs = base.unsqueeze(0).expand(noise.population_size, -1, -1).clone()
+    if candidate_inputs:
+        if token_ids.shape[0] != noise.population_size:
+            raise ValueError("candidate token inputs must match the population")
+        rows = torch.arange(noise.population_size, device=token_ids.device)
+        selected_right = right[rows, token_ids, :]
+        outputs = base[:, None, :]
+    else:
+        selected_right = right[:, token_ids, :]
+        outputs = base.unsqueeze(0).expand(noise.population_size, -1, -1).clone()
     scale = sigma / math.sqrt(noise.rank)
     for rank_index in range(noise.rank):
-        outputs.addcmul_(
-            selected_right[:, :, rank_index, None],
-            left[:, None, :, rank_index],
-            value=scale,
-        )
+        if candidate_inputs:
+            outputs.addcmul_(
+                selected_right[:, rank_index, None, None],
+                left[:, None, :, rank_index],
+                value=scale,
+            )
+        else:
+            outputs.addcmul_(
+                selected_right[:, :, rank_index, None],
+                left[:, None, :, rank_index],
+                value=scale,
+            )
     return outputs
 
 
@@ -232,6 +248,19 @@ def slice_pair_noise(noise: AntitheticNoise, start: int, end: int) -> Antithetic
     )
 
 
+def _cast_noise(noise: AntitheticNoise, dtype: torch.dtype) -> AntitheticNoise:
+    return AntitheticNoise(
+        matrices={
+            name: MatrixFactors(
+                left=factors.left.to(dtype), right=factors.right.to(dtype),
+            )
+            for name, factors in noise.matrices.items()
+        },
+        vectors={name: values.to(dtype) for name, values in noise.vectors.items()},
+        rank=noise.rank,
+    )
+
+
 def _population_readout_sums(
     model: VanillaRNN,
     states: Tensor,
@@ -255,6 +284,79 @@ def _population_readout_sums(
     losses = (torch.logsumexp(logits, dim=-1) - target_logits).sum(dim=-1)
     correct = logits.argmax(dim=-1).eq(targets).sum(dim=-1)
     return losses, correct
+
+
+@torch.no_grad()
+def _grouped_population_loss_and_accuracy(
+    model: VanillaRNN,
+    inputs: Tensor,
+    targets: Tensor,
+    noise: AntitheticNoise,
+    sigma: float,
+) -> tuple[Tensor, Tensor]:
+    """Evaluate one candidate-specific sequence per population member."""
+
+    if inputs.shape != targets.shape or inputs.shape[0] != noise.population_size:
+        raise ValueError("grouped inputs and targets must match the population")
+    readout_mask = targets.ne(-100)
+    counts = readout_mask.sum(dim=1)
+    if not counts.numel() or int(counts.min()) < 1 or not counts.eq(counts[0]).all():
+        raise ValueError("grouped candidates must have equal nonzero target counts")
+    query_count = int(counts[0])
+    selected_times = readout_mask.any(dim=0)
+    selected_time_flags = selected_times.tolist()
+    time_to_slot = selected_times.cumsum(dim=0) - 1
+    hidden = model.input_weight.new_zeros(
+        noise.population_size, 1, model.hidden_size,
+    )
+    selected_states = []
+    for time, token_ids in enumerate(inputs.unbind(dim=1)):
+        input_term = _population_embedding(
+            token_ids,
+            model.input_weight,
+            "input_weight",
+            noise,
+            sigma,
+            candidate_inputs=True,
+        )
+        recurrent_term = _population_affine(
+            hidden,
+            model.recurrent_weight,
+            "recurrent_weight",
+            noise,
+            sigma,
+            bias=model.hidden_bias,
+            bias_name="hidden_bias",
+        )
+        hidden = torch.tanh(input_term + recurrent_term)
+        if selected_time_flags[time]:
+            selected_states.append(hidden[:, 0])
+    stacked_states = torch.stack(selected_states, dim=1)
+    readout_positions = readout_mask.nonzero(as_tuple=False)[:, 1].reshape(
+        noise.population_size, query_count,
+    )
+    readout_slots = time_to_slot[readout_positions]
+    candidate_rows = torch.arange(noise.population_size, device=inputs.device)[:, None]
+    readout_states = stacked_states[candidate_rows, readout_slots]
+    readout_targets = targets[readout_mask].reshape(noise.population_size, query_count)
+    loss_sums = model.input_weight.new_zeros(noise.population_size)
+    correct_counts = model.input_weight.new_zeros(noise.population_size)
+    for start in range(0, query_count, 8):
+        end = min(start + 8, query_count)
+        logits = _population_affine(
+            readout_states[:, start:end],
+            model.output_weight,
+            "output_weight",
+            noise,
+            sigma,
+            bias=model.output_bias,
+            bias_name="output_bias",
+        ).float()
+        selected_targets = readout_targets[:, start:end]
+        target_logits = logits.gather(-1, selected_targets[..., None]).squeeze(-1)
+        loss_sums += (torch.logsumexp(logits, dim=-1) - target_logits).sum(dim=-1)
+        correct_counts += logits.argmax(dim=-1).eq(selected_targets).sum(dim=-1)
+    return loss_sums / query_count, correct_counts / query_count
 
 
 @torch.no_grad()
@@ -332,23 +434,60 @@ def evaluate_population(
     sigma: float,
     *,
     candidate_chunk_size: int,
+    data_mode: str = "cartesian",
+    precision: str = "float32",
 ) -> tuple[Tensor, Tensor]:
     """Return per-candidate loss and accuracy, chunking complete +/- pairs."""
 
     if candidate_chunk_size < 2 or candidate_chunk_size % 2:
         raise ValueError("candidate_chunk_size must be positive and even")
+    if data_mode not in {"cartesian", "grouped"}:
+        raise ValueError("data_mode must be cartesian or grouped")
+    if precision not in {"float32", "bfloat16"}:
+        raise ValueError("precision must be float32 or bfloat16")
+    if data_mode == "grouped" and noise.pair_count % inputs.shape[0]:
+        raise ValueError("antithetic pairs must divide evenly across grouped examples")
+    device_type = model.input_weight.device.type
+    if (
+        precision == "bfloat16"
+        and device_type == "cuda"
+        and not torch.cuda.is_bf16_supported()
+    ):
+        raise ValueError("CUDA device does not support bfloat16")
     pair_chunk_size = candidate_chunk_size // 2
     positive_losses = []
     negative_losses = []
     positive_accuracies = []
     negative_accuracies = []
     for start in range(0, noise.pair_count, pair_chunk_size):
+        end = min(start + pair_chunk_size, noise.pair_count)
         chunk = slice_pair_noise(
-            noise, start, min(start + pair_chunk_size, noise.pair_count),
+            noise, start, end,
         )
-        losses, accuracies = _population_loss_and_accuracy(
-            model, inputs, targets, chunk, sigma,
-        )
+        if precision == "bfloat16":
+            chunk = _cast_noise(chunk, torch.bfloat16)
+        if data_mode == "grouped":
+            pair_examples = torch.arange(start, end, device=inputs.device)
+            pair_examples.remainder_(inputs.shape[0])
+            signed_examples = torch.cat((pair_examples, pair_examples))
+            chunk_inputs = inputs[signed_examples]
+            chunk_targets = targets[signed_examples]
+        else:
+            chunk_inputs = inputs
+            chunk_targets = targets
+        with torch.autocast(
+            device_type=device_type,
+            dtype=torch.bfloat16,
+            enabled=precision == "bfloat16",
+        ):
+            if data_mode == "grouped":
+                losses, accuracies = _grouped_population_loss_and_accuracy(
+                    model, chunk_inputs, chunk_targets, chunk, sigma,
+                )
+            else:
+                losses, accuracies = _population_loss_and_accuracy(
+                    model, chunk_inputs, chunk_targets, chunk, sigma,
+                )
         positive_losses.append(losses[: chunk.pair_count])
         negative_losses.append(losses[chunk.pair_count :])
         positive_accuracies.append(accuracies[: chunk.pair_count])

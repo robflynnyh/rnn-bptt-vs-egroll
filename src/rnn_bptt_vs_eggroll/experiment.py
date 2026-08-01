@@ -61,6 +61,8 @@ class ExperimentConfig:
     recurrent_radius: float = 0.9
     population_size: int = 16_384
     population_chunk_size: int = 1_024
+    population_data_mode: str = "cartesian"
+    population_precision: str = "float32"
     perturbation_rank: int = 1
     sigma: float = 0.005
     sigma_decay: float = 1.0
@@ -136,6 +138,17 @@ class ExperimentConfig:
             raise ValueError("population_size must be positive and even")
         if self.population_chunk_size < 2 or self.population_chunk_size % 2:
             raise ValueError("population_chunk_size must be positive and even")
+        if self.population_data_mode not in {"cartesian", "grouped"}:
+            raise ValueError("population_data_mode must be cartesian or grouped")
+        if self.population_precision not in {"float32", "bfloat16"}:
+            raise ValueError("population_precision must be float32 or bfloat16")
+        if (
+            self.population_data_mode == "grouped"
+            and self.population_size // 2 % self.batch_size
+        ):
+            raise ValueError(
+                "antithetic pairs must divide evenly across grouped examples"
+            )
         if self.perturbation_rank < 1:
             raise ValueError("perturbation_rank must be positive")
         if self.sigma <= 0 or not 0 < self.sigma_decay <= 1:
@@ -480,6 +493,8 @@ def _eggroll_update(
     perturbation_rank: int,
     sigma: float,
     fitness_shaping: str,
+    population_data_mode: str,
+    population_precision: str,
     noise_generator: torch.Generator,
 ) -> dict[str, float]:
     noise = sample_antithetic_noise(
@@ -494,6 +509,8 @@ def _eggroll_update(
             noise,
             sigma,
             candidate_chunk_size=min(candidate_chunk_size, local_population_size),
+            data_mode=population_data_mode,
+            precision=population_precision,
         )
         global_losses = _gather_equal_shards(local_losses)
         global_accuracies = _gather_equal_shards(local_accuracies)
@@ -535,6 +552,19 @@ def _eggroll_update(
         "gradient_scale": gradient_scale,
         "raw_gradient_rms": gradient_rms(raw_reward_gradients),
         "gradient_rms": gradient_rms(reward_gradients),
+        "grouped_data": float(population_data_mode == "grouped"),
+        "bfloat16_forward": float(population_precision == "bfloat16"),
+        "unique_examples": float(inputs.shape[0]),
+        "candidates_per_example": float(
+            global_population_size / inputs.shape[0]
+            if population_data_mode == "grouped"
+            else global_population_size
+        ),
+        "candidate_example_evaluations": float(
+            global_population_size
+            if population_data_mode == "grouped"
+            else global_population_size * inputs.shape[0]
+        ),
     }
 
 
@@ -643,6 +673,13 @@ def run_experiment(
         local_population_size = config.population_size // world_size
         if local_population_size < 2 or local_population_size % 2:
             raise ValueError("each worker needs a positive even population shard")
+        if (
+            config.population_data_mode == "grouped"
+            and local_population_size // 2 % config.batch_size
+        ):
+            raise ValueError(
+                "each grouped population shard must divide across the examples"
+            )
     if _is_primary():
         output_dir.mkdir(parents=True, exist_ok=True)
     if dist.is_initialized():
@@ -791,6 +828,8 @@ def run_experiment(
                 perturbation_rank=config.perturbation_rank,
                 sigma=current_sigma,
                 fitness_shaping=config.fitness_shaping,
+                population_data_mode=config.population_data_mode,
+                population_precision=config.population_precision,
                 noise_generator=noise_generator,
             )
         else:
@@ -888,7 +927,9 @@ def run_experiment(
             "unique_training_sequences": config.generations * config.batch_size,
             "training_sequences": config.generations * config.batch_size,
             "eggroll_candidate_forward_sequences": (
-                config.generations * config.batch_size * config.population_size
+                config.generations
+                * config.population_size
+                * (1 if config.population_data_mode == "grouped" else config.batch_size)
                 if config.method == "eggroll"
                 else 0
             ),
@@ -946,6 +987,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--population-size", type=int)
     parser.add_argument("--population-chunk-size", type=int)
+    parser.add_argument(
+        "--population-data-mode", choices=("cartesian", "grouped"),
+    )
+    parser.add_argument(
+        "--population-precision", choices=("float32", "bfloat16"),
+    )
     parser.add_argument("--hidden-size", type=int)
     parser.add_argument("--recurrent-radius", type=float)
     parser.add_argument(
@@ -998,6 +1045,8 @@ def _apply_cli_overrides(
         "batch_size",
         "population_size",
         "population_chunk_size",
+        "population_data_mode",
+        "population_precision",
         "hidden_size",
         "recurrent_radius",
         "curriculum_sequence_lengths",

@@ -74,6 +74,20 @@ BPTT uses AdamW. EGGROLL uses antithetic low-rank parameter perturbations,
 global fitness shaping, plain SGD without weight decay, and no loss backward
 pass.
 
+EGGROLL supports two ways to assign training examples to candidates:
+
+- `cartesian` evaluates every candidate on every example in the batch. This is
+  the compatibility default.
+- `grouped` assigns each antithetic pair to one example, with pairs distributed
+  evenly across the batch. The positive and negative members of a pair always
+  see the same example, so their fitness difference is not confounded by data
+  sampling. For `P=8192` and 8 unique examples, each example scores 1,024
+  candidates while the generation requires 8,192 candidate-example forwards.
+
+Candidate evaluation can use BF16 without changing the persistent FP32 model,
+sampled perturbations, fitness shaping, or parameter update. Candidate logits
+are converted to FP32 before cross-entropy and accuracy are computed.
+
 The comparison does not constrain the methods to equal data, updates,
 wall-clock time, or forward compute. The objective is to give each optimizer a
 strong opportunity to reach its maximum learnable MQAR stage.
@@ -125,6 +139,14 @@ rnn-memory-compare \
   --log-progress
 ```
 
+The tuned grouped EGGROLL launcher uses `P=8192`, 8 unique sequences, one full
+population chunk, BF16 candidate forwards, rank-1 perturbations, `sigma=0.005`,
+and SGD learning rate `0.01`:
+
+```bash
+bash scripts/launch_eggroll_zoology.sh
+```
+
 Population evaluation is chunked to control the large vocabulary readout. It
 can also be sharded while retaining global fitness shaping:
 
@@ -140,12 +162,13 @@ torchrun --standalone --nproc_per_node=4 \
   --log-progress
 ```
 
-The reference candidate chunk is 1,024. Candidate networks share the base
-weights and apply their rank-1 corrections in a batched population dimension;
-query losses are accumulated as each readout position is produced so the full
-population-by-query-by-vocabulary tensor is never retained. Rank-1 corrections
-are fused into the base activations, and nearby query states share larger
-readout projections.
+The Cartesian reference candidate chunk is 1,024; the grouped launcher uses a
+measured full-population chunk of 8,192. Candidate networks share the base
+weights and apply their rank-1 corrections in a batched population dimension.
+Grouped evaluation retains states only at timesteps containing a query and
+processes query readouts in bounded blocks, so it never retains the full
+population-by-query-by-vocabulary tensor. Rank-1 corrections are fused into the
+base activations.
 
 ## Tracking
 

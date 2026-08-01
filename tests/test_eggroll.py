@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from rnn_bptt_vs_eggroll.eggroll import (
     evaluate_population,
@@ -61,6 +62,48 @@ def test_chunked_population_preserves_antithetic_order() -> None:
     )
     assert torch.allclose(losses, expected_losses)
     assert torch.equal(accuracies, expected_accuracies)
+
+
+def test_grouped_population_matches_materialized_candidates() -> None:
+    torch.manual_seed(21)
+    model = VanillaRNN(7, 3)
+    inputs = torch.randint(7, (2, 6))
+    targets = torch.full((2, 6), -100)
+    targets[0, 2] = 3
+    targets[1, 4] = 5
+    noise = sample_antithetic_noise(
+        model, population_size=8, rank=1, generator=torch.Generator().manual_seed(22),
+    )
+    sigma = 0.02
+
+    losses, accuracies = evaluate_population(
+        model,
+        inputs,
+        targets,
+        noise,
+        sigma,
+        candidate_chunk_size=4,
+        data_mode="grouped",
+    )
+    expected_losses = []
+    expected_accuracies = []
+    for candidate in range(noise.population_size):
+        pair = candidate % noise.pair_count
+        example = pair % inputs.shape[0]
+        mask = targets[example : example + 1].ne(-100)
+        selected_targets = targets[example : example + 1][mask]
+        logits = functional_rnn_forward(
+            inputs[example : example + 1],
+            materialize_candidate_parameters(model, noise, candidate, sigma),
+            readout_mask=mask,
+        )
+        expected_losses.append(F.cross_entropy(logits, selected_targets))
+        expected_accuracies.append(
+            logits.argmax(dim=-1).eq(selected_targets).float().mean()
+        )
+
+    assert torch.allclose(losses, torch.stack(expected_losses), atol=2e-6, rtol=2e-5)
+    assert torch.equal(accuracies, torch.stack(expected_accuracies))
 
 
 def test_antithetic_candidates_are_symmetric() -> None:
