@@ -12,14 +12,12 @@ from rnn_bptt_vs_eggroll.experiment import (
 
 
 def test_curriculum_advances_after_one_passing_probe() -> None:
-    config = replace(
-        smoke_config(), curriculum_delays=(0, 4), curriculum_accuracy_threshold=0.75,
-    )
+    config = replace(smoke_config(), curriculum_accuracy_threshold=0.75,)
     state = CurriculumState()
     assert update_curriculum(state, 0.7, config, generation=1) is None
     transition = update_curriculum(state, 0.8, config, generation=2,)
     assert transition is not None
-    assert state.current_max_delay(config) == 4
+    assert state.current_task(config) == (16, 2)
 
 
 def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
@@ -30,11 +28,8 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
         evaluation_examples=8,
         test_examples=8,
         evaluation_batch_size=4,
-        evaluation_pairs=(2,),
-        evaluation_delays=(0, 4, 8),
         population_size=4,
-        population_chunk_size=4,
-        curriculum_delays=(0, 4),
+        population_chunk_size=2,
         curriculum_accuracy_threshold=0.0,
         curriculum_probe_examples=4,
     )
@@ -55,17 +50,18 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
             result["budgets"]["eggroll_candidate_forward_sequences"]
             == expected_candidate_forwards
         )
-        assert len(result["test"]["grid"]) == 3
-        assert {row["delay"] for row in result["validation_history"][0]["grid"]} == {0}
-        assert {row["delay"] for row in result["validation_history"][-1]["grid"]} == {
-            0,
-            4,
-        }
+        assert len(result["test"]["grid"]) == 2
+        assert {
+            row["sequence_length"] for row in result["validation_history"][0]["grid"]
+        } == {8}
+        assert {
+            row["sequence_length"] for row in result["validation_history"][-1]["grid"]
+        } == {8, 16,}
         transitions = result["curriculum"]["transitions"]
         assert len(transitions) == 1
         assert transitions[0]["generation"] == 1
-        assert transitions[0]["from_max_delay"] == 0
-        assert transitions[0]["to_max_delay"] == 4
+        assert transitions[0]["from_sequence_length"] == 8
+        assert transitions[0]["to_sequence_length"] == 16
         assert (output_dir / "metrics.json").is_file()
         assert (output_dir / "model.pt").is_file()
 
@@ -126,8 +122,8 @@ def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
     logged_keys = {key for row in fake_wandb.run.logged for key in row}
     assert "train/batch_loss" in logged_keys
     assert "curriculum/frontier_accuracy" in logged_keys
-    assert "validation_grid/pairs_2/delay_0/accuracy" in logged_keys
-    assert "test_grid/pairs_2/delay_0/accuracy" in logged_keys
+    assert "validation_grid/seq_len_8/kv_pairs_1/accuracy" in logged_keys
+    assert "test_grid/seq_len_8/kv_pairs_1/accuracy" in logged_keys
     assert {path.rsplit("/", 1)[-1] for path, _ in fake_wandb.run.saved} == {
         "metrics.json",
         "model.pt",

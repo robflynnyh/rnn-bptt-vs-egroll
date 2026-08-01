@@ -1,68 +1,79 @@
 # RNN BPTT vs EGGROLL
 
-An initial benchmark for asking how long an associative memory a vanilla
-recurrent network can learn with either backpropagation through time or
-gradient-free evolution.
+A controlled comparison of how far a vanilla recurrent network can learn
+multi-query associative recall (MQAR) using backpropagation through time or
+forward-only EGGROLL.
 
-This repository is an experiment scaffold, not a result. The first milestone is
-to establish that both methods learn the short-delay task before spending a
-large compute budget on memory-horizon and dynamics comparisons.
+This repository is an experiment scaffold, not a result. BPTT and EGGROLL run
+as independent processes with independent curricula and run times.
 
-## Experiment
+## Task
 
-Each example contains random one-to-one key-value associations, a configurable
-distractor delay, and a query for one stored key:
+The task follows the released generator from
+[Zoology](https://github.com/HazyResearch/zoology). Each example begins with
+unique alternating key/value tokens. Every key then appears once as a query in
+the remaining sequence and must retrieve its associated value:
 
 ```text
-STORE(k1, v1), ..., STORE(km, vm), DISTRACTOR * d, QUERY(ki) -> vi
+k1, v1, k2, v2, ..., filler, k2, filler, ..., k1, filler
+                         targets: v2              v1
 ```
 
-Keys and values are sampled without replacement within an example. The mapping
-changes on every example, so a model cannot solve the task by memorising a
-global key-to-value lookup. Supervision is applied only after the query. The
-main evaluation records:
+Keys come from the lower half of an 8,192-token vocabulary and values from the
+upper half. Both are sampled without replacement within an example, so the
+mapping cannot be memorized across examples. Query positions use Zoology's
+power-law gap distribution with `power_a=0.01`. Following the paper's Figure 2
+configuration, token `0` fills non-query positions. Loss and accuracy are
+computed only at query positions.
 
-- the longest delay `d` each method learns during its curriculum;
-- the number of stored pairs `m`;
-- later, state noise and numerical precision.
+This is benchmark-aligned rather than an exact Zoology reproduction. Zoology
+compares language-model sequence mixers in separate fixed-length runs. Here a
+single-layer tanh Elman RNN persists through an accuracy-gated curriculum so
+the two optimizers can be compared.
 
-Each process trains exactly one method. Matching seeds produce byte-identical
-initial parameters in the same tanh Elman RNN, but BPTT and EGGROLL have
-independent data streams, curricula, run times, and output directories. BPTT
-uses AdamW. EGGROLL uses forward-only antithetic low-rank perturbations; no
-loss backward pass is performed for that model.
+## Curriculum
 
-### Accuracy-gated delay curriculum
+The reference curriculum begins below Zoology's shortest headline setting and
+then uses its density of one key/value pair per 16 tokens:
 
-The reference preset does not expose the model to the full delay range from the
-start. It begins at delay 0 and uses the frontier sequence
-`0, 2, 4, 8, 16, 32`. Half of training batches use the current frontier; the
-rest rehearse previously introduced delays. At each evaluation, the active
-model is measured on a fixed validation probe at its frontier. Its frontier
-advances immediately after one probe exceeds 90% accuracy. The threshold,
-frontier sampling probability, and milestones are configurable:
+| Stage | Sequence length | KV pairs |
+| ---: | ---: | ---: |
+| 0 | 16 | 1 |
+| 1 | 32 | 2 |
+| 2 | 64 | 4 |
+| 3 | 128 | 8 |
+| 4 | 256 | 16 |
+| 5 | 512 | 32 |
+| 6 | 1,024 | 64 |
+
+Half of training batches use the current frontier; the other half rehearse
+previously reached stages. One fixed validation probe above 90% accuracy
+advances the frontier. Validation and final testing cover only stages reached
+during training, so W&B does not contain out-of-distribution grid cells.
+
+The schedule is configurable:
 
 ```bash
 rnn-memory-compare \
   --method bptt \
   --preset reference \
-  --curriculum-delays 0,1,2,4,8,16,32 \
+  --curriculum-sequence-lengths 16,32,64,128,256,512,1024 \
+  --curriculum-num-kv-pairs 1,2,4,8,16,32,64 \
   --curriculum-accuracy-threshold 0.9
 ```
 
-`--no-curriculum` restores uniform sampling over the full configured delay
-range. Every probe and transition is stored in `metrics.json`.
+`--no-curriculum` trains only the final configured stage. Every validation
+probe and transition is recorded in `metrics.json` and W&B.
 
-The initial preset trains with two associations drawn from four keys and four
-values. This is already a genuine binding task: ignoring the query and returning
-one of the two stored values is capped at 50%. The evaluation grid also tests
-one and four associations. Once both methods reliably traverse the delay
-curriculum, vocabulary size and binding capacity should be scaled separately.
+## Methods
 
-The setup reports unique labelled sequences and EGGROLL candidate-forward
-sequences for context, but does not constrain the methods to equal data,
-updates, wall-clock time, or forward compute. The primary objective is to give
-each method a strong opportunity to reach its maximum learnable delay.
+Matching seeds produce byte-identical initial parameters in the same RNN.
+BPTT uses AdamW. EGGROLL uses antithetic low-rank parameter perturbations,
+global fitness shaping, and no loss backward pass.
+
+The comparison does not constrain the methods to equal data, updates,
+wall-clock time, or forward compute. The objective is to give each optimizer a
+strong opportunity to reach its maximum learnable MQAR stage.
 
 ## Setup
 
@@ -70,10 +81,10 @@ each method a strong opportunity to reach its maximum learnable delay.
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
-pytest
+python -m pytest
 ```
 
-Run the tiny CPU-safe integration check:
+Run the CPU-safe integration checks:
 
 ```bash
 rnn-memory-compare \
@@ -89,24 +100,7 @@ rnn-memory-compare \
   --log-progress
 ```
 
-The research preset carries over the working population EGGROLL setup from
-[`spiral-extrapolation`](https://github.com/robflynnyh/spiral-extrapolation):
-
-| Setting | Value |
-| --- | ---: |
-| Global population | 16,384 |
-| Batch | 256 |
-| Updates | 3,000 |
-| Training associations | 2 of 4 keys/values |
-| Delay curriculum | 0, 2, 4, 8, 16, 32 |
-| Perturbation | antithetic rank 1 |
-| Sigma | 0.005 |
-| Fitness shaping | global z-score |
-| EGGROLL update | SGD, lr 0.3, wd 0.001 |
-| BPTT update | AdamW, lr 0.003, wd 0.001 |
-
-That is a starting point, not an assertion that the spiral hyperparameters are
-optimal for an RNN. A single-device run is:
+Run each research method independently:
 
 ```bash
 rnn-memory-compare \
@@ -128,8 +122,8 @@ rnn-memory-compare \
   --log-progress
 ```
 
-Population evaluation is chunked to control activation memory. It can also be
-sharded over four GPUs while retaining global fitness shaping:
+Population evaluation is chunked to control the large vocabulary readout. It
+can also be sharded while retaining global fitness shaping:
 
 ```bash
 torchrun --standalone --nproc_per_node=4 \
@@ -143,57 +137,40 @@ torchrun --standalone --nproc_per_node=4 \
   --log-progress
 ```
 
-The reference run is intentionally expensive: 12.58 billion candidate-sequence
-forwards before accounting for recurrent timesteps. Start with the smoke preset
-and a reduced population while checking whether the task and learning curves
-behave sensibly.
+## Tracking
 
-### W&B tracking
-
-Research commands enable W&B under the
+W&B runs use the
 [`rnn-bptt-vs-eggroll`](https://wandb.ai/wobrob101/rnn-bptt-vs-eggroll)
-project. Tracking includes optimizer diagnostics, sampled delays, curriculum
-frontiers and transitions, every validation-grid cell, the final test grid,
-timings, configuration, `metrics.json`, and `model.pt`. BPTT and EGGROLL use
-separate W&B runs; `--wandb-group` can group runs that belong to the same
-comparison. In distributed EGGROLL, only rank 0 initializes and uploads to
-W&B.
+project. Tracking includes optimizer diagnostics, sampled sequence length and
+pair count, curriculum transitions, reached-stage validation, timing,
+configuration, `metrics.json`, and `model.pt`. Only rank 0 logs distributed
+EGGROLL runs.
 
-## Outputs
+Each run also writes:
 
-Each run writes:
+- `metrics.json`: configuration, validation history, reached-stage test grid,
+  timing, budgets, and initialization checksum;
+- `model.pt`: final model state dictionary.
 
-- `metrics.json`: exact configuration, validation history, final test grid,
-  timings, sample budgets, and initialization checksums;
-- `model.pt`: the final state dictionary for the selected method.
+## Prior Work
 
-The test grid keeps `num_pairs` and `delay` explicit rather than averaging them
-into one score. This matters because remembering one cue for a long time and
-dynamically binding several arbitrary associations are different capabilities.
-
-## Relation to prior work
+[Zoology](https://arxiv.org/abs/2312.04927) introduced MQAR to test multiple
+in-context recalls at varied positions and realistic vocabulary scale.
 
 [Gomez and Schmidhuber (2005)](https://sferics.idsia.ch/pub/juergen/gecco05gomez.pdf)
 compared evolved recurrent policies with BPTT and LSTM baselines on delayed-cue
-T-mazes, including extremely long corridors. Their experiment changes the
-training framework and network configuration as well as the optimiser, and the
-memory content is essentially one cue bit. This repository targets the narrower
-optimizer-controlled, dynamic-association comparison.
+T-mazes. Their memory content is essentially one cue bit; MQAR instead requires
+dynamic key/value binding.
 
 [Qu et al. (2026)](https://www.biorxiv.org/content/10.64898/2026.07.09.737022v1.full)
 compare BPTT, evolution strategies, and genetic algorithms using the same RNN
 on short `n`-back tasks. The remaining question here is the maximum trainable
-memory horizon for arbitrary key-value bindings.
+MQAR stage for each optimizer.
 
-## Next experiments
+## Next Experiments
 
-1. Tune each method using only short-delay validation data and multiple seeds.
-2. Let each independently progressing curriculum run until it reaches a
-   reproducible learning limit.
-3. Sweep recurrent initialization radius and include orthogonal/unitary and
-   gated-RNN controls.
+1. Tune each method using reached-stage validation and multiple seeds.
+2. Let each curriculum progress independently to a reproducible learning limit.
+3. Sweep recurrent initialization radius and add gated-RNN controls.
 4. Measure hidden-state decodability, recurrent Jacobian singular values,
    fixed points, and robustness to state noise.
-5. Near each method's curriculum limit, verify the result across seeds and
-   inspect whether the recurrent dynamics retain information throughout the
-   trained delay.

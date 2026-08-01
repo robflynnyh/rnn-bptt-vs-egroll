@@ -1,11 +1,11 @@
 """BPTT versus EGGROLL on associative recall."""
 
 from .model import VanillaRNN
-from .task import AssociativeRecallBatch, AssociativeRecallConfig, sample_batch
+from .task import MQARBatch, MQARConfig, sample_batch
 
 __all__ = [
-    "AssociativeRecallBatch",
-    "AssociativeRecallConfig",
+    "MQARBatch",
+    "MQARConfig",
     "VanillaRNN",
     "sample_batch",
 ]

@@ -40,11 +40,7 @@ class AntitheticNoise:
 
 
 def sample_antithetic_noise(
-    model: nn.Module,
-    population_size: int,
-    rank: int,
-    *,
-    generator: torch.Generator,
+    model: nn.Module, population_size: int, rank: int, *, generator: torch.Generator,
 ) -> AntitheticNoise:
     """Sample rank-r matrix noise and full vector noise in +/- pairs."""
 
@@ -124,31 +120,50 @@ def _population_affine(
     return outputs
 
 
+def _population_embedding(
+    token_ids: Tensor,
+    weight: Tensor,
+    weight_name: str,
+    noise: AntitheticNoise,
+    sigma: float,
+) -> Tensor:
+    """Embed token IDs for every low-rank population member."""
+
+    if token_ids.ndim != 1 or token_ids.dtype != torch.long:
+        raise ValueError("token_ids must have shape [batch]")
+    factors = noise.matrices[weight_name]
+    left = _signed_pair(factors.left)
+    right = _repeated_pair(factors.right)
+    base = F.embedding(token_ids, weight.transpose(0, 1))
+    selected_right = right[:, token_ids, :]
+    perturbation = torch.einsum("pbr,phr->pbh", selected_right, left)
+    return base.unsqueeze(0) + (sigma / math.sqrt(noise.rank)) * perturbation
+
+
 @torch.no_grad()
 def population_forward(
     model: VanillaRNN,
     inputs: Tensor,
     noise: AntitheticNoise,
     sigma: float,
+    *,
+    readout_mask: Tensor | None = None,
 ) -> Tensor:
-    """Evaluate a population without materialising full perturbed matrices."""
+    """Evaluate population logits at the final or selected MQAR positions."""
 
-    if inputs.ndim != 3:
-        raise ValueError("inputs must have shape [batch, time, input_size]")
+    if inputs.ndim != 2 or inputs.dtype != torch.long:
+        raise ValueError("inputs must be integer token IDs with shape [batch, time]")
+    if readout_mask is not None and readout_mask.shape != inputs.shape:
+        raise ValueError("readout_mask must have the same shape as inputs")
     if sigma < 0:
         raise ValueError("sigma must be non-negative")
-    hidden = inputs.new_zeros(
-        noise.population_size,
-        inputs.shape[0],
-        model.hidden_size,
+    hidden = model.input_weight.new_zeros(
+        noise.population_size, inputs.shape[0], model.hidden_size,
     )
-    for step in inputs.unbind(dim=1):
-        input_term = _population_affine(
-            step,
-            model.input_weight,
-            "input_weight",
-            noise,
-            sigma,
+    selected_logits = []
+    for time, token_ids in enumerate(inputs.unbind(dim=1)):
+        input_term = _population_embedding(
+            token_ids, model.input_weight, "input_weight", noise, sigma,
         )
         recurrent_term = _population_affine(
             hidden,
@@ -160,6 +175,22 @@ def population_forward(
             bias_name="hidden_bias",
         )
         hidden = torch.tanh(input_term + recurrent_term)
+        if readout_mask is not None and readout_mask[:, time].any():
+            selected_logits.append(
+                _population_affine(
+                    hidden[:, readout_mask[:, time]],
+                    model.output_weight,
+                    "output_weight",
+                    noise,
+                    sigma,
+                    bias=model.output_bias,
+                    bias_name="output_bias",
+                )
+            )
+    if readout_mask is not None:
+        if not selected_logits:
+            raise ValueError("readout_mask must select at least one position")
+        return torch.cat(selected_logits, dim=1)
     return _population_affine(
         hidden,
         model.output_weight,
@@ -179,8 +210,7 @@ def slice_pair_noise(noise: AntitheticNoise, start: int, end: int) -> Antithetic
     return AntitheticNoise(
         matrices={
             name: MatrixFactors(
-                left=factors.left[start:end],
-                right=factors.right[start:end],
+                left=factors.left[start:end], right=factors.right[start:end],
             )
             for name, factors in noise.matrices.items()
         },
@@ -210,16 +240,30 @@ def evaluate_population(
     negative_accuracies = []
     for start in range(0, noise.pair_count, pair_chunk_size):
         chunk = slice_pair_noise(
-            noise,
-            start,
-            min(start + pair_chunk_size, noise.pair_count),
+            noise, start, min(start + pair_chunk_size, noise.pair_count),
         )
-        logits = population_forward(model, inputs, chunk, sigma)
-        losses = -logits.log_softmax(dim=-1).gather(
-            dim=-1,
-            index=targets[None, :, None].expand(chunk.population_size, -1, 1),
-        ).squeeze(-1).mean(dim=-1)
-        accuracies = logits.argmax(dim=-1).eq(targets).float().mean(dim=-1)
+        readout_mask = targets.ne(-100)
+        logits = population_forward(
+            model, inputs, chunk, sigma, readout_mask=readout_mask,
+        )
+        supervised_targets = torch.cat(
+            [
+                targets[:, time][readout_mask[:, time]]
+                for time in range(targets.shape[1])
+            ]
+        )
+        losses = (
+            -logits.log_softmax(dim=-1)
+            .gather(
+                dim=-1,
+                index=supervised_targets[None, :, None].expand(
+                    chunk.population_size, -1, 1
+                ),
+            )
+            .squeeze(-1)
+            .mean(dim=-1)
+        )
+        accuracies = logits.argmax(dim=-1).eq(supervised_targets).float().mean(dim=-1)
         positive_losses.append(losses[: chunk.pair_count])
         negative_losses.append(losses[chunk.pair_count :])
         positive_accuracies.append(accuracies[: chunk.pair_count])
@@ -248,8 +292,7 @@ def shape_fitness(losses: Tensor, mode: str = "zscore") -> Tensor:
 
 
 def estimate_reward_gradients(
-    noise: AntitheticNoise,
-    fitness: Tensor,
+    noise: AntitheticNoise, fitness: Tensor,
 ) -> dict[str, Tensor]:
     """Estimate the reference fitness-weighted forward perturbation."""
 
@@ -274,8 +317,7 @@ def estimate_reward_gradients(
 
 
 def assign_maximization_gradients(
-    model: nn.Module,
-    reward_gradients: dict[str, Tensor],
+    model: nn.Module, reward_gradients: dict[str, Tensor],
 ) -> None:
     """Assign negative gradients so a standard optimizer maximizes fitness."""
 
@@ -294,10 +336,7 @@ def gradient_rms(gradients: dict[str, Tensor]) -> float:
 
 @torch.no_grad()
 def materialize_candidate_parameters(
-    model: nn.Module,
-    noise: AntitheticNoise,
-    candidate: int,
-    sigma: float,
+    model: nn.Module, noise: AntitheticNoise, candidate: int, sigma: float,
 ) -> dict[str, Tensor]:
     """Materialise one candidate for tests and mechanistic inspection."""
 

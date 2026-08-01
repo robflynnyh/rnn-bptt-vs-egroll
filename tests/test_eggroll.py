@@ -12,13 +12,10 @@ from rnn_bptt_vs_eggroll.model import VanillaRNN, functional_rnn_forward
 
 def test_population_forward_matches_materialized_candidates() -> None:
     torch.manual_seed(10)
-    model = VanillaRNN(5, 4, 3)
-    inputs = torch.randn(2, 6, 5)
+    model = VanillaRNN(11, 4)
+    inputs = torch.randint(11, (2, 6))
     noise = sample_antithetic_noise(
-        model,
-        population_size=6,
-        rank=2,
-        generator=torch.Generator().manual_seed(11),
+        model, population_size=6, rank=2, generator=torch.Generator().manual_seed(11),
     )
     sigma = 0.03
 
@@ -26,8 +23,7 @@ def test_population_forward_matches_materialized_candidates() -> None:
     explicit_logits = torch.stack(
         [
             functional_rnn_forward(
-                inputs,
-                materialize_candidate_parameters(model, noise, index, sigma),
+                inputs, materialize_candidate_parameters(model, noise, index, sigma),
             )
             for index in range(noise.population_size)
         ]
@@ -37,40 +33,40 @@ def test_population_forward_matches_materialized_candidates() -> None:
 
 def test_chunked_population_preserves_antithetic_order() -> None:
     torch.manual_seed(5)
-    model = VanillaRNN(4, 3, 2)
-    inputs = torch.randn(3, 4, 4)
-    targets = torch.tensor([0, 1, 0])
+    model = VanillaRNN(7, 3)
+    inputs = torch.randint(7, (3, 4))
+    targets = torch.full((3, 4), -100)
+    targets[0, 1] = 0
+    targets[1, 2] = 1
+    targets[2, 1] = 0
     noise = sample_antithetic_noise(
-        model,
-        population_size=8,
-        rank=1,
-        generator=torch.Generator().manual_seed(6),
+        model, population_size=8, rank=1, generator=torch.Generator().manual_seed(6),
     )
     losses, accuracies = evaluate_population(
-        model,
-        inputs,
-        targets,
-        noise,
-        0.02,
-        candidate_chunk_size=4,
+        model, inputs, targets, noise, 0.02, candidate_chunk_size=4,
     )
-    logits = population_forward(model, inputs, noise, 0.02)
-    expected_losses = -logits.log_softmax(dim=-1).gather(
-        -1,
-        targets[None, :, None].expand(8, -1, 1),
-    ).squeeze(-1).mean(dim=-1)
-    expected_accuracies = logits.argmax(dim=-1).eq(targets).float().mean(dim=-1)
+    readout_mask = targets.ne(-100)
+    logits = population_forward(model, inputs, noise, 0.02, readout_mask=readout_mask,)
+    supervised_targets = torch.cat(
+        [targets[:, time][readout_mask[:, time]] for time in range(targets.shape[1])]
+    )
+    expected_losses = (
+        -logits.log_softmax(dim=-1)
+        .gather(-1, supervised_targets[None, :, None].expand(8, -1, 1),)
+        .squeeze(-1)
+        .mean(dim=-1)
+    )
+    expected_accuracies = (
+        logits.argmax(dim=-1).eq(supervised_targets).float().mean(dim=-1)
+    )
     assert torch.allclose(losses, expected_losses)
     assert torch.equal(accuracies, expected_accuracies)
 
 
 def test_antithetic_candidates_are_symmetric() -> None:
-    model = VanillaRNN(3, 4, 2)
+    model = VanillaRNN(9, 4)
     noise = sample_antithetic_noise(
-        model,
-        population_size=4,
-        rank=1,
-        generator=torch.Generator().manual_seed(8),
+        model, population_size=4, rank=1, generator=torch.Generator().manual_seed(8),
     )
     plus = materialize_candidate_parameters(model, noise, 0, 0.1)
     minus = materialize_candidate_parameters(model, noise, 2, 0.1)

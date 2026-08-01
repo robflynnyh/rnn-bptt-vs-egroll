@@ -1,4 +1,4 @@
-"""Synthetic dynamic key-value associative recall."""
+"""Zoology-style multi-query associative recall."""
 
 from __future__ import annotations
 
@@ -8,154 +8,129 @@ import torch
 from torch import Tensor
 
 
-@dataclass(frozen=True)
-class AssociativeRecallConfig:
-    """Vocabulary and distractor settings shared by every task split."""
+IGNORE_INDEX = -100
 
-    num_keys: int = 8
-    num_values: int = 8
-    distractor_std: float = 0.0
+
+@dataclass(frozen=True)
+class MQARConfig:
+    """Vocabulary and query-gap settings from the Zoology MQAR benchmark."""
+
+    vocab_size: int = 8_192
+    power_a: float = 0.01
+    random_non_queries: bool = False
 
     def __post_init__(self) -> None:
-        if self.num_keys < 2 or self.num_values < 2:
-            raise ValueError("num_keys and num_values must both be at least two")
-        if self.distractor_std < 0:
-            raise ValueError("distractor_std must be non-negative")
+        if self.vocab_size < 8 or self.vocab_size % 2:
+            raise ValueError("vocab_size must be an even integer of at least 8")
+        if self.power_a <= 0:
+            raise ValueError("power_a must be positive")
 
     @property
-    def input_size(self) -> int:
-        # Concatenated key/value slots plus STORE, DISTRACTOR, and QUERY flags.
-        return self.num_keys + self.num_values + 3
-
-    @property
-    def store_flag(self) -> int:
-        return self.num_keys + self.num_values
-
-    @property
-    def distractor_flag(self) -> int:
-        return self.store_flag + 1
-
-    @property
-    def query_flag(self) -> int:
-        return self.store_flag + 2
+    def key_vocab_size(self) -> int:
+        return self.vocab_size // 2
 
 
 @dataclass(frozen=True)
-class AssociativeRecallBatch:
-    """A batch plus metadata that makes shortcut checks straightforward."""
+class MQARBatch:
+    """A token batch with labels only at MQAR query positions."""
 
     inputs: Tensor
     targets: Tensor
-    stored_keys: Tensor
-    stored_values: Tensor
-    query_indices: Tensor
-    query_keys: Tensor
-    delay: int
+    keys: Tensor
+    values: Tensor
+    query_positions: Tensor
+    sequence_length: int
+    num_kv_pairs: int
 
-    def to(self, device: torch.device | str) -> "AssociativeRecallBatch":
-        return AssociativeRecallBatch(
+    def to(self, device: torch.device | str) -> "MQARBatch":
+        return MQARBatch(
             inputs=self.inputs.to(device),
             targets=self.targets.to(device),
-            stored_keys=self.stored_keys.to(device),
-            stored_values=self.stored_values.to(device),
-            query_indices=self.query_indices.to(device),
-            query_keys=self.query_keys.to(device),
-            delay=self.delay,
+            keys=self.keys.to(device),
+            values=self.values.to(device),
+            query_positions=self.query_positions.to(device),
+            sequence_length=self.sequence_length,
+            num_kv_pairs=self.num_kv_pairs,
         )
 
 
 def _sample_without_replacement(
-    batch_size: int,
-    vocabulary_size: int,
-    count: int,
-    *,
-    generator: torch.Generator,
+    batch_size: int, choices: int, count: int, *, generator: torch.Generator,
 ) -> Tensor:
-    scores = torch.rand(batch_size, vocabulary_size, generator=generator)
-    return scores.argsort(dim=-1)[:, :count]
+    scores = torch.rand(batch_size, choices, generator=generator)
+    return scores.topk(count, dim=-1, largest=False).indices
 
 
 def sample_batch(
     batch_size: int,
-    num_pairs: int,
-    delay: int,
-    config: AssociativeRecallConfig,
+    sequence_length: int,
+    num_kv_pairs: int,
+    config: MQARConfig,
     *,
     generator: torch.Generator,
-) -> AssociativeRecallBatch:
-    """Sample random one-to-one associations and query one stored key.
+) -> MQARBatch:
+    """Generate MQAR examples following Zoology's released construction.
 
-    Sequence layout is ``STORE(key, value) * num_pairs``, followed by ``delay``
-    distractor steps and one ``QUERY(key)`` step. Only the final-step value is
-    supervised. Keys and values are unique within an example, preventing
-    frequency and duplicate-value shortcuts.
+    Each sequence starts with alternating unique key/value tokens. Every key is
+    then placed once as a query at a power-law sampled even position in the
+    remaining sequence. Labels are ignored everywhere except query positions.
     """
 
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    if num_pairs < 1:
-        raise ValueError("num_pairs must be positive")
-    if num_pairs > min(config.num_keys, config.num_values):
-        raise ValueError("num_pairs cannot exceed either vocabulary size")
-    if delay < 0:
-        raise ValueError("delay must be non-negative")
+    if sequence_length < 4 or sequence_length % 2:
+        raise ValueError("sequence_length must be an even integer of at least 4")
+    if num_kv_pairs < 1:
+        raise ValueError("num_kv_pairs must be positive")
+    if 4 * num_kv_pairs > sequence_length:
+        raise ValueError("sequence_length must provide context and query slots")
+    if num_kv_pairs >= config.key_vocab_size:
+        raise ValueError("num_kv_pairs exceeds the available key vocabulary")
+    if config.vocab_size <= sequence_length:
+        raise ValueError("Zoology MQAR requires vocab_size > sequence_length")
 
-    stored_keys = _sample_without_replacement(
-        batch_size,
-        config.num_keys,
-        num_pairs,
+    key_choice_count = config.key_vocab_size - 1
+    keys = 1 + _sample_without_replacement(
+        batch_size, key_choice_count, num_kv_pairs, generator=generator,
+    )
+    values = config.key_vocab_size + _sample_without_replacement(
+        batch_size, config.key_vocab_size, num_kv_pairs, generator=generator,
+    )
+
+    context_size = 2 * num_kv_pairs
+    inputs = torch.zeros(batch_size, sequence_length, dtype=torch.long)
+    inputs[:, :context_size:2] = keys
+    inputs[:, 1:context_size:2] = values
+
+    query_space = (sequence_length - context_size) // 2
+    distances = torch.arange(1, query_space + 1, dtype=torch.float64)
+    probabilities = config.power_a * distances.pow(config.power_a - 1)
+    probabilities /= probabilities.sum()
+    query_slots = torch.multinomial(
+        probabilities.expand(batch_size, -1),
+        num_kv_pairs,
+        replacement=False,
         generator=generator,
     )
-    stored_values = _sample_without_replacement(
-        batch_size,
-        config.num_values,
-        num_pairs,
-        generator=generator,
-    )
-    query_indices = torch.randint(
-        num_pairs,
-        (batch_size,),
-        generator=generator,
-    )
-    rows = torch.arange(batch_size)
-    query_keys = stored_keys[rows, query_indices]
-    targets = stored_values[rows, query_indices]
+    query_positions = context_size + 2 * query_slots
+    inputs.scatter_(1, query_positions, keys)
 
-    sequence_length = num_pairs + delay + 1
-    inputs = torch.zeros(batch_size, sequence_length, config.input_size)
-    pair_positions = torch.arange(num_pairs)
-    pair_rows = rows[:, None].expand(-1, num_pairs)
-    pair_steps = pair_positions[None, :].expand(batch_size, -1)
-    inputs[pair_rows, pair_steps, stored_keys] = 1.0
-    inputs[
-        pair_rows,
-        pair_steps,
-        config.num_keys + stored_values,
-    ] = 1.0
-    inputs[:, :num_pairs, config.store_flag] = 1.0
+    targets = torch.full_like(inputs, IGNORE_INDEX)
+    targets.scatter_(1, query_positions, values)
 
-    if delay:
-        delay_slice = slice(num_pairs, num_pairs + delay)
-        inputs[:, delay_slice, config.distractor_flag] = 1.0
-        if config.distractor_std:
-            content_noise = torch.randn(
-                batch_size,
-                delay,
-                config.num_keys + config.num_values,
-                generator=generator,
-            )
-            inputs[:, delay_slice, : config.num_keys + config.num_values] = (
-                config.distractor_std * content_noise
-            )
+    if config.random_non_queries:
+        filler_mask = inputs.eq(0)
+        random_tokens = torch.randint(
+            config.vocab_size, inputs.shape, generator=generator,
+        )
+        inputs[filler_mask] = random_tokens[filler_mask]
 
-    inputs[rows, -1, query_keys] = 1.0
-    inputs[:, -1, config.query_flag] = 1.0
-    return AssociativeRecallBatch(
+    return MQARBatch(
         inputs=inputs,
         targets=targets,
-        stored_keys=stored_keys,
-        stored_values=stored_values,
-        query_indices=query_indices,
-        query_keys=query_keys,
-        delay=delay,
+        keys=keys,
+        values=values,
+        query_positions=query_positions,
+        sequence_length=sequence_length,
+        num_kv_pairs=num_kv_pairs,
     )
