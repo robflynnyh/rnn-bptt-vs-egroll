@@ -56,6 +56,11 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
             == expected_candidate_forwards
         )
         assert len(result["test"]["grid"]) == 3
+        assert {row["delay"] for row in result["validation_history"][0]["grid"]} == {0}
+        assert {row["delay"] for row in result["validation_history"][-1]["grid"]} == {
+            0,
+            4,
+        }
         transitions = result["curriculum"]["transitions"]
         assert len(transitions) == 1
         assert transitions[0]["generation"] == 1

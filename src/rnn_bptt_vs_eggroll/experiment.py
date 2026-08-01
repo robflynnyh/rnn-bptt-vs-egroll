@@ -665,6 +665,13 @@ def run_experiment(
     def record(step: int, *, allow_curriculum_advance: bool) -> None:
         frontier_before_probe = curriculum_state.current_max_delay(config)
         if _is_primary():
+            validation_delays = tuple(
+                delay
+                for delay in config.evaluation_delays
+                if delay <= frontier_before_probe
+            )
+            if frontier_before_probe not in validation_delays:
+                validation_delays = (*validation_delays, frontier_before_probe)
             grid = evaluate_grid(
                 {config.method: model},
                 task_config,
@@ -672,6 +679,7 @@ def run_experiment(
                 split="validation",
                 example_count=config.evaluation_examples,
                 device=device,
+                evaluation_delays=tuple(sorted(validation_delays)),
             )
             curriculum_metrics: dict[str, Any] = {
                 "enabled": config.curriculum_enabled,
