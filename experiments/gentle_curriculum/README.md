@@ -72,19 +72,26 @@ decisions, and conclusions will be added after the bounded runs complete.
 
 | Role | Seed | Schedule | Generations | W&B | Status |
 |---|---:|---|---:|---|---|
-| Existing reference evidence | 7 | Reference | 83,662 | [`gunzsjri`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/gunzsjri) | Completed until manually stopped |
+| Scheduled-LR reference evidence | 7 | Reference | 14,392 | [`ceijp8r1`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/ceijp8r1) | Ran until manually stopped |
+| Long reference evidence | 7 | Reference | 83,662 | [`gunzsjri`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/gunzsjri) | Ran until manually stopped |
 | Exact duplicate reference | 7 | Reference | 4,290 | [`59vrqlqz`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/59vrqlqz) | Intentionally stopped as redundant |
 | Bounded treatment | 7 | Gentle | 20,000 target | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Running |
 
-The existing reference used the same seed, model, Cartesian population,
+The scheduled-LR reference used the same seed, model, Cartesian population,
 batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
-SGD learning rate, no weight decay, fixed 512-example probe, threshold, and
-reference schedule. It used constant learning rate 0.3 and frontier sampling
-probability 1.0. The latter difference has no effect while stage zero is the
-only reached stage. At generation 20,000 its `(16,1)` probe accuracy was 0%,
-and it never advanced from `(16,1)` over 83,662 generations (38,114.9 seconds,
-final probe accuracy 0.586%). This is stronger negative evidence for the
-reference schedule than spending more compute on the duplicate.
+cosine learning-rate schedule, no weight decay, fixed 512-example probe,
+threshold, and reference schedule. Its frontier sampling probability was 1.0,
+which has no effect while stage zero is the only reached stage. It never
+advanced from `(16,1)` over 14,392 generations (6,555.0 seconds; final probe
+accuracy 0.195%).
+
+The longer reference was identical except that its learning rate stayed at
+0.3. At generation 20,000 its `(16,1)` probe accuracy was 0%, and it never
+advanced over 83,662 generations (38,114.9 seconds; final probe accuracy
+0.586%). Together these runs are stronger negative evidence for the reference
+schedule than spending more compute on the duplicate. The constant learning
+rate in the longer run remains a comparison limitation, so matched early
+diagnostics use the scheduled-LR run where relevant.
 
 The exact duplicate included the cosine learning-rate schedule and 0.5
 frontier rehearsal specified above. It also remained at `(16,1)` through
@@ -96,18 +103,18 @@ learning-rate difference is retained as a comparison limitation.
 
 ## Interim matched diagnostics
 
-These values compare the existing reference and gentle treatment at the same
-generation. Accuracy is from each run's fixed 512-example frontier probe. The
-tasks differ here by design: reference probes `(16,1)`, while gentle is still
-probing `(4,1)`. They therefore diagnose optimization trajectory rather than
-the predeclared common-milestone outcome.
+These values compare the scheduled-LR reference and gentle treatment at the
+same generation. Accuracy is from each run's fixed 512-example frontier probe.
+The tasks differ here by design: reference probes `(16,1)`, while gentle is
+still probing `(4,1)`. They therefore diagnose optimization trajectory rather
+than the predeclared common-milestone outcome.
 
 | Generation | Reference train loss | Reference probe | Gentle train loss | Gentle probe |
 |---:|---:|---:|---:|---:|
-| 1,000 | 8.8205 | 0.000% | 8.7043 | 0.195% |
-| 2,000 | 8.5307 | 0.000% | 8.4401 | 0.000% |
-| 4,000 | 8.4220 | 0.000% | 8.0334 | 0.781% |
-| 6,000 | 8.3976 | 0.000% | 7.6883 | 2.148% |
+| 1,000 | 8.8186 | 0.000% | 8.7043 | 0.195% |
+| 2,000 | 8.5271 | 0.000% | 8.4401 | 0.000% |
+| 4,000 | 8.4172 | 0.195% | 8.0334 | 0.781% |
+| 6,000 | 8.4206 | 0.000% | 7.6883 | 2.148% |
 
 The gentle run has a clearly better early optimization trajectory, but this is
 not yet evidence that it masters a higher common milestone. The primary result
