@@ -240,6 +240,102 @@ def test_adaptive_mutation_scales_reject_elite_update() -> None:
         )
 
 
+def test_resume_and_bootstrap_options_are_validated() -> None:
+    with pytest.raises(ValueError, match="set together"):
+        replace(smoke_config(), bootstrap_model_path="model.pt")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        replace(
+            smoke_config(),
+            bootstrap_model_path="model.pt",
+            bootstrap_metrics_path="metrics.json",
+            resume_checkpoint="checkpoint.pt",
+        )
+    with pytest.raises(ValueError, match="wandb_run_id"):
+        replace(smoke_config(), wandb_resume="allow")
+    with pytest.raises(ValueError, match="positive"):
+        replace(smoke_config(), checkpoint_interval=0)
+
+
+def test_full_state_checkpoint_resume_matches_uninterrupted_training(tmp_path) -> None:
+    config = replace(
+        smoke_config(seed=29),
+        method="bptt",
+        generations=4,
+        curriculum_enabled=False,
+        evaluation_interval=2,
+        evaluation_examples=4,
+        test_examples=4,
+        evaluation_batch_size=4,
+        checkpoint_interval=2,
+    )
+    uninterrupted_dir = tmp_path / "uninterrupted"
+    resumed_dir = tmp_path / "resumed"
+    uninterrupted = run_experiment(
+        uninterrupted_dir, device=torch.device("cpu"), config=config,
+    )
+    checkpoint = uninterrupted_dir / "checkpoints" / "generation_0000000002.pt"
+
+    resumed = run_experiment(
+        resumed_dir,
+        device=torch.device("cpu"),
+        config=replace(config, resume_checkpoint=str(checkpoint)),
+    )
+
+    assert uninterrupted is not None
+    assert resumed is not None
+    assert resumed["start"] == {
+        "kind": "checkpoint",
+        "generation": 2,
+        "checkpoint_path": str(checkpoint),
+        "rng_continuity": True,
+    }
+    uninterrupted_state = torch.load(
+        uninterrupted_dir / "model.pt", map_location="cpu", weights_only=True,
+    )
+    resumed_state = torch.load(
+        resumed_dir / "model.pt", map_location="cpu", weights_only=True,
+    )
+    assert uninterrupted_state.keys() == resumed_state.keys()
+    assert all(
+        torch.equal(uninterrupted_state[name], resumed_state[name])
+        for name in uninterrupted_state
+    )
+    assert not list((resumed_dir / "checkpoints").glob("*.tmp"))
+
+
+def test_completed_run_can_bootstrap_a_longer_target(tmp_path) -> None:
+    parent_config = replace(
+        smoke_config(seed=31),
+        method="bptt",
+        generations=2,
+        evaluation_interval=1,
+        evaluation_examples=4,
+        test_examples=4,
+        evaluation_batch_size=4,
+        curriculum_probe_examples=4,
+        curriculum_accuracy_threshold=0.0,
+    )
+    parent_dir = tmp_path / "parent"
+    run_experiment(parent_dir, device=torch.device("cpu"), config=parent_config)
+    continuation = run_experiment(
+        tmp_path / "continuation",
+        device=torch.device("cpu"),
+        config=replace(
+            parent_config,
+            generations=3,
+            bootstrap_model_path=str(parent_dir / "model.pt"),
+            bootstrap_metrics_path=str(parent_dir / "metrics.json"),
+        ),
+    )
+
+    assert continuation is not None
+    assert continuation["start"]["kind"] == "bootstrap"
+    assert continuation["start"]["generation"] == 2
+    assert continuation["start"]["rng_continuity"] is False
+    assert continuation["update_history"][0]["generation"] == 3
+    assert continuation["budgets"]["continuation_training_sequences"] == 8
+
+
 def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
     class FakeRun:
         def __init__(self) -> None:
@@ -284,12 +380,16 @@ def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
         final_full_curriculum_probe=True,
         wandb_enabled=True,
         wandb_run_name="test-bptt",
+        wandb_run_id="resume-me",
+        wandb_resume="allow",
     )
 
     result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
 
     assert result is not None
     assert fake_wandb.init_kwargs["config"]["method"] == "bptt"
+    assert fake_wandb.init_kwargs["id"] == "resume-me"
+    assert fake_wandb.init_kwargs["resume"] == "allow"
     logged_keys = {key for row in fake_wandb.run.logged for key in row}
     assert "train/batch_loss" in logged_keys
     assert "curriculum/frontier_accuracy" in logged_keys

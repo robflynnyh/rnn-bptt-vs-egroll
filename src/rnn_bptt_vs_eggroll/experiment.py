@@ -141,6 +141,12 @@ class ExperimentConfig:
     wandb_entity: str | None = "wobrob101"
     wandb_run_name: str | None = None
     wandb_group: str | None = None
+    wandb_run_id: str | None = None
+    wandb_resume: str | None = None
+    bootstrap_model_path: str | None = None
+    bootstrap_metrics_path: str | None = None
+    resume_checkpoint: str | None = None
+    checkpoint_interval: int | None = None
     log_progress: bool = False
 
     def __post_init__(self) -> None:
@@ -277,6 +283,19 @@ class ExperimentConfig:
             raise ValueError("bptt_gradient_clip must be positive")
         if not self.wandb_project:
             raise ValueError("wandb_project must be non-empty")
+        if self.wandb_resume not in {None, "allow", "must", "never"}:
+            raise ValueError("wandb_resume must be allow, must, never, or unset")
+        if self.wandb_resume is not None and self.wandb_run_id is None:
+            raise ValueError("wandb_resume requires wandb_run_id")
+        bootstrap_paths = (self.bootstrap_model_path, self.bootstrap_metrics_path)
+        if (bootstrap_paths[0] is None) != (bootstrap_paths[1] is None):
+            raise ValueError("bootstrap model and metrics paths must be set together")
+        if self.resume_checkpoint is not None and bootstrap_paths[0] is not None:
+            raise ValueError(
+                "resume checkpoint and bootstrap paths are mutually exclusive"
+            )
+        if self.checkpoint_interval is not None and self.checkpoint_interval < 1:
+            raise ValueError("checkpoint_interval must be positive")
 
 
 def smoke_config(seed: int = 7) -> ExperimentConfig:
@@ -380,6 +399,235 @@ def _state_checksum(model: VanillaRNN) -> str:
     return digest.hexdigest()
 
 
+_BOOTSTRAP_MATCH_FIELDS = (
+    "method",
+    "seed",
+    "batch_size",
+    "curriculum_enabled",
+    "curriculum_schedule",
+    "curriculum_sequence_lengths",
+    "curriculum_num_kv_pairs",
+    "curriculum_accuracy_threshold",
+    "curriculum_frontier_probability",
+    "curriculum_probe_examples",
+    "evaluation_examples",
+    "evaluation_batch_size",
+    "evaluation_interval",
+    "vocab_size",
+    "query_power_a",
+    "random_non_queries",
+    "hidden_size",
+    "recurrent_radius",
+    "tie_input_output",
+    "population_size",
+    "population_chunk_size",
+    "population_data_mode",
+    "population_precision",
+    "perturbation_rank",
+    "sigma",
+    "sigma_decay",
+    "adaptive_mutation_scales",
+    "mutation_scale_learning_rate",
+    "mutation_scale_min",
+    "mutation_scale_max",
+    "fitness_shaping",
+    "eggroll_update_rule",
+    "elite_count",
+    "elite_commit_scale",
+    "eggroll_learning_rate",
+    "eggroll_learning_rate_decay",
+    "eggroll_learning_rate_final",
+    "eggroll_learning_rate_decay_start",
+    "eggroll_learning_rate_decay_end",
+    "eggroll_weight_decay",
+    "eggroll_momentum",
+    "bptt_learning_rate",
+    "bptt_learning_rate_decay",
+    "bptt_weight_decay",
+    "bptt_gradient_clip",
+)
+_RESUME_IGNORED_FIELDS = {
+    "wandb_enabled",
+    "wandb_project",
+    "wandb_entity",
+    "wandb_run_name",
+    "wandb_group",
+    "wandb_run_id",
+    "wandb_resume",
+    "bootstrap_model_path",
+    "bootstrap_metrics_path",
+    "resume_checkpoint",
+    "checkpoint_interval",
+    "log_progress",
+}
+
+
+def _normalise_config_value(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
+def _resume_signature(config: ExperimentConfig) -> dict[str, Any]:
+    return {
+        name: _normalise_config_value(value)
+        for name, value in asdict(config).items()
+        if name not in _RESUME_IGNORED_FIELDS
+    }
+
+
+def _load_bootstrap_state(
+    config: ExperimentConfig,
+    model: VanillaRNN,
+    mutation_scales: dict[str, float],
+    curriculum_state: CurriculumState,
+    *,
+    device: torch.device,
+) -> tuple[int, float, float, dict[str, Any]]:
+    assert config.bootstrap_model_path is not None
+    assert config.bootstrap_metrics_path is not None
+    metrics_path = Path(config.bootstrap_metrics_path)
+    model_path = Path(config.bootstrap_model_path)
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    parent_config = metrics["config"]
+    mismatches = []
+    for name in _BOOTSTRAP_MATCH_FIELDS:
+        parent_value = _normalise_config_value(parent_config.get(name))
+        current_value = _normalise_config_value(getattr(config, name))
+        if parent_value != current_value:
+            mismatches.append(f"{name}: {parent_value!r} != {current_value!r}")
+    if mismatches:
+        raise ValueError("bootstrap configuration mismatch: " + "; ".join(mismatches))
+    model.load_state_dict(
+        torch.load(model_path, map_location=device, weights_only=True)
+    )
+    generation = int(parent_config["generations"])
+    if generation >= config.generations:
+        raise ValueError("bootstrap generation must precede the target generation")
+    curriculum = metrics["curriculum"]
+    curriculum_state.stage = int(curriculum["final_stage"])
+    curriculum_state.transitions = list(curriculum["transitions"])
+    parent_scales = metrics.get("final_mutation_scales", {})
+    mutation_scales.update(
+        {
+            name: float(parent_scales.get(name, value))
+            for name, value in mutation_scales.items()
+        }
+    )
+    current_sigma = config.sigma * config.sigma_decay**generation
+    method_seconds = float(metrics.get("timing_seconds", {}).get("training", 0.0))
+    provenance = {
+        "kind": "bootstrap",
+        "generation": generation,
+        "model_path": str(model_path),
+        "metrics_path": str(metrics_path),
+        "rng_continuity": False,
+    }
+    return generation, current_sigma, method_seconds, provenance
+
+
+def _checkpoint_path(output_dir: Path, generation: int) -> Path:
+    return output_dir / "checkpoints" / f"generation_{generation:010d}.pt"
+
+
+def _save_checkpoint(
+    output_dir: Path,
+    config: ExperimentConfig,
+    model: VanillaRNN,
+    optimizer: torch.optim.Optimizer,
+    curriculum_state: CurriculumState,
+    *,
+    generation: int,
+    current_sigma: float,
+    mutation_scales: dict[str, float],
+    data_generator: torch.Generator,
+    stage_generator: torch.Generator,
+    noise_generator: torch.Generator,
+    method_seconds: float,
+    last_training_stage: int,
+) -> Path:
+    checkpoint_path = _checkpoint_path(output_dir, generation)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp")
+    payload = {
+        "format_version": 1,
+        "generation": generation,
+        "config_signature": _resume_signature(config),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "curriculum": {
+            "stage": curriculum_state.stage,
+            "transitions": curriculum_state.transitions,
+        },
+        "current_sigma": current_sigma,
+        "mutation_scales": mutation_scales,
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_states": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+        ),
+        "data_generator_state": data_generator.get_state(),
+        "stage_generator_state": stage_generator.get_state(),
+        "noise_generator_state": noise_generator.get_state(),
+        "method_seconds": method_seconds,
+        "last_training_stage": last_training_stage,
+    }
+    torch.save(payload, temporary_path)
+    os.replace(temporary_path, checkpoint_path)
+    return checkpoint_path
+
+
+def _load_checkpoint_state(
+    config: ExperimentConfig,
+    model: VanillaRNN,
+    optimizer: torch.optim.Optimizer,
+    mutation_scales: dict[str, float],
+    curriculum_state: CurriculumState,
+    data_generator: torch.Generator,
+    stage_generator: torch.Generator,
+    noise_generator: torch.Generator,
+    *,
+    device: torch.device,
+) -> tuple[int, float, float, int, dict[str, Any]]:
+    assert config.resume_checkpoint is not None
+    checkpoint_path = Path(config.resume_checkpoint)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if checkpoint.get("format_version") != 1:
+        raise ValueError("unsupported checkpoint format")
+    if checkpoint.get("config_signature") != _resume_signature(config):
+        raise ValueError("resume checkpoint configuration does not match this run")
+    generation = int(checkpoint["generation"])
+    if generation >= config.generations:
+        raise ValueError("checkpoint generation must precede the target generation")
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    curriculum_state.stage = int(checkpoint["curriculum"]["stage"])
+    curriculum_state.transitions = list(checkpoint["curriculum"]["transitions"])
+    mutation_scales.clear()
+    mutation_scales.update(
+        {name: float(value) for name, value in checkpoint["mutation_scales"].items()}
+    )
+    torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
+    cuda_states = checkpoint["cuda_rng_states"]
+    if cuda_states and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([state.cpu() for state in cuda_states])
+    data_generator.set_state(checkpoint["data_generator_state"].cpu())
+    stage_generator.set_state(checkpoint["stage_generator_state"].cpu())
+    noise_generator.set_state(checkpoint["noise_generator_state"].cpu())
+    provenance = {
+        "kind": "checkpoint",
+        "generation": generation,
+        "checkpoint_path": str(checkpoint_path),
+        "rng_continuity": True,
+    }
+    return (
+        generation,
+        float(checkpoint["current_sigma"]),
+        float(checkpoint["method_seconds"]),
+        int(checkpoint["last_training_stage"]),
+        provenance,
+    )
+
+
 def _initialize_wandb(config: ExperimentConfig, output_dir: Path,) -> Any | None:
     if not config.wandb_enabled or not _is_primary():
         return None
@@ -392,6 +640,8 @@ def _initialize_wandb(config: ExperimentConfig, output_dir: Path,) -> Any | None
         entity=config.wandb_entity,
         name=config.wandb_run_name or output_dir.name,
         group=config.wandb_group,
+        id=config.wandb_run_id,
+        resume=config.wandb_resume,
         config=asdict(config),
     )
     run.define_metric("generation")
@@ -911,6 +1161,10 @@ def run_experiment(
     rank = _rank()
     if config.method == "bptt" and world_size != 1:
         raise ValueError("BPTT runs use one process; torchrun is only for EGGROLL")
+    if world_size != 1 and (
+        config.resume_checkpoint is not None or config.checkpoint_interval is not None
+    ):
+        raise ValueError("full-state checkpointing currently requires one worker")
     local_population_size = 0
     if config.method == "eggroll":
         if config.population_size % world_size:
@@ -929,7 +1183,6 @@ def run_experiment(
         output_dir.mkdir(parents=True, exist_ok=True)
     if dist.is_initialized():
         dist.barrier()
-    wandb_run = _initialize_wandb(config, output_dir)
 
     task_config = MQARConfig(
         vocab_size=config.vocab_size,
@@ -941,8 +1194,6 @@ def run_experiment(
         config.vocab_size, config.hidden_size, recurrent_radius=config.recurrent_radius,
         tie_input_output=config.tie_input_output,
     ).to(device)
-    _broadcast_model(model)
-    initial_checksum = _state_checksum(model)
     mutation_scales = {name: 1.0 for name, _ in model.named_parameters()}
 
     if config.method == "bptt":
@@ -973,6 +1224,55 @@ def run_experiment(
     method_seconds = 0.0
     curriculum_state = CurriculumState()
     last_training_stage = curriculum_state.current_stage(config)
+    start_generation = 0
+    provenance: dict[str, Any] = {
+        "kind": "fresh",
+        "generation": 0,
+        "rng_continuity": True,
+    }
+    if config.resume_checkpoint is not None:
+        (
+            start_generation,
+            current_sigma,
+            method_seconds,
+            last_training_stage,
+            provenance,
+        ) = _load_checkpoint_state(
+            config,
+            model,
+            optimizer,
+            mutation_scales,
+            curriculum_state,
+            data_generator,
+            stage_generator,
+            noise_generator,
+            device=device,
+        )
+    elif config.bootstrap_model_path is not None:
+        (
+            start_generation,
+            current_sigma,
+            method_seconds,
+            provenance,
+        ) = _load_bootstrap_state(
+            config,
+            model,
+            mutation_scales,
+            curriculum_state,
+            device=device,
+        )
+        continuation_seed_offset = start_generation * 10_000_019
+        data_generator.manual_seed(config.seed + 30_001 + continuation_seed_offset)
+        stage_generator.manual_seed(config.seed + 40_001 + continuation_seed_offset)
+        noise_generator.manual_seed(
+            config.seed + 60_001 + continuation_seed_offset + rank * 1_000_003
+        )
+        last_training_stage = curriculum_state.current_stage(config)
+    else:
+        current_sigma = config.sigma
+    _broadcast_model(model)
+    initial_checksum = _state_checksum(model)
+    wandb_run = _initialize_wandb(config, output_dir)
 
     def record(step: int, *, allow_curriculum_advance: bool) -> None:
         frontier_stage = curriculum_state.current_stage(config)
@@ -1052,10 +1352,10 @@ def run_experiment(
                 )
         _broadcast_curriculum_state(curriculum_state, device)
 
-    record(0, allow_curriculum_advance=False)
-    current_sigma = config.sigma
+    if config.resume_checkpoint is None:
+        record(start_generation, allow_curriculum_advance=False)
     experiment_start = time.perf_counter()
-    for generation in range(1, config.generations + 1):
+    for generation in range(start_generation + 1, config.generations + 1):
         if (
             config.method == "eggroll"
             and config.eggroll_update_rule == "standardized"
@@ -1168,6 +1468,28 @@ def run_experiment(
             or generation == config.generations
         ):
             record(generation, allow_curriculum_advance=True)
+        if (
+            config.checkpoint_interval is not None
+            and generation % config.checkpoint_interval == 0
+            and _is_primary()
+        ):
+            checkpoint_path = _save_checkpoint(
+                output_dir,
+                config,
+                model,
+                optimizer,
+                curriculum_state,
+                generation=generation,
+                current_sigma=current_sigma,
+                mutation_scales=mutation_scales,
+                data_generator=data_generator,
+                stage_generator=stage_generator,
+                noise_generator=noise_generator,
+                method_seconds=method_seconds,
+                last_training_stage=last_training_stage,
+            )
+            if config.log_progress:
+                print(json.dumps({"checkpoint": str(checkpoint_path)}), flush=True)
 
     _synchronize(device)
     experiment_seconds = time.perf_counter() - experiment_start
@@ -1201,6 +1523,7 @@ def run_experiment(
         "experiment": "single_method_zoology_mqar_curriculum",
         "method": config.method,
         "config": asdict(config),
+        "start": provenance,
         "model": {
             "architecture": "single_layer_tanh_elman_rnn",
             "vocab_size": task_config.vocab_size,
@@ -1221,6 +1544,9 @@ def run_experiment(
         "budgets": {
             "unique_training_sequences": config.generations * config.batch_size,
             "training_sequences": config.generations * config.batch_size,
+            "continuation_training_sequences": (
+                (config.generations - start_generation) * config.batch_size
+            ),
             "eggroll_candidate_forward_sequences": (
                 config.generations
                 * config.population_size
@@ -1368,6 +1694,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb-entity")
     parser.add_argument("--wandb-run-name")
     parser.add_argument("--wandb-group")
+    parser.add_argument("--wandb-run-id")
+    parser.add_argument("--wandb-resume", choices=("allow", "must", "never"))
+    parser.add_argument("--bootstrap-model-path")
+    parser.add_argument("--bootstrap-metrics-path")
+    parser.add_argument("--resume-checkpoint")
+    parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--log-progress", action="store_true")
     return parser
 
@@ -1423,6 +1755,12 @@ def _apply_cli_overrides(
         "wandb_entity",
         "wandb_run_name",
         "wandb_group",
+        "wandb_run_id",
+        "wandb_resume",
+        "bootstrap_model_path",
+        "bootstrap_metrics_path",
+        "resume_checkpoint",
+        "checkpoint_interval",
     )
     if args.curriculum_schedule is not None:
         config = apply_curriculum_schedule(config, args.curriculum_schedule)

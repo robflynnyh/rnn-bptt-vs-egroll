@@ -103,8 +103,9 @@ decisions, and conclusions will be added after the bounded runs complete.
 | Long reference evidence | 7 | Reference | 83,662 | [`gunzsjri`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/gunzsjri) | Ran until manually stopped |
 | Exact duplicate reference | 7 | Reference | 4,290 | [`59vrqlqz`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/59vrqlqz) | Intentionally stopped as redundant |
 | Untied treatment | 7 | Gentle | 13,200 | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Intentionally stopped for tied ablation |
-| Tied follow-up | 7 | Gentle, tied input/output | 20,000 target | [`okos5dn0`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/okos5dn0) | Running |
+| Tied follow-up | 7 | Gentle, tied input/output | 20,000 | [`okos5dn0`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/okos5dn0) | Complete; reached raw length 32 |
 | Adaptive-scale follow-up | 7 | Gentle, tied input/output, learned block scales | 3,180 | [`0fjtgz6y`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/0fjtgz6y) | Intentionally stopped after scale runaway |
+| Long tied continuation | 7 | Gentle, tied input/output | 2,000,000 ceiling | [`tied2m07`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tied2m07) | Active; bootstrapped at generation 20,000 |
 
 The scheduled-LR reference used the same seed, model, Cartesian population,
 batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
@@ -133,6 +134,24 @@ gentle treatment then remained at `(4,1)` through generation 13,200. Its final
 fixed-probe accuracy was 9.18%, and its best observed fixed-probe accuracy was
 10.94%. It was stopped at the user's request to test exact input/output weight
 tying, which directly targets the coordination bottleneck described below.
+
+The tied follow-up passed seven curriculum gates between generations 17,400
+and 18,400, ending at raw length 32 with two key-value pairs and logical query
+span 14. Its final fixed-probe accuracy was 91.60% at raw length 4, 73.24% at
+raw length 16, and 17.29% at the newly reached raw length 32. This establishes
+that exact input/output tying removed the early optimization bottleneck, but
+the 20,000-generation boundary arrived shortly after promotion to length 32.
+
+The long continuation preserves that completed run and starts a separate W&B
+record. It loads the generation-20,000 model, curriculum stage, transition
+history, mutation scales, and cumulative training time. The old run did not
+save RNG or optimizer state, so its first continuation segment uses new,
+deterministic data and perturbation streams. From generation 40,000 onward,
+atomic full-state checkpoints every 20,000 generations preserve exact model,
+optimizer, curriculum, mutation-scale, and RNG continuity. Relaunching
+`scripts/run_tied_long_continuation.sh` automatically selects the newest such
+checkpoint. The 2,000,000-generation value is a manual-stop ceiling, not a
+claim that all of that compute is required.
 
 ## Interim matched diagnostics
 
