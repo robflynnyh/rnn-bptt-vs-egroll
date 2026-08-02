@@ -119,3 +119,26 @@ than the predeclared common-milestone outcome.
 The gentle run has a clearly better early optimization trajectory, but this is
 not yet evidence that it masters a higher common milestone. The primary result
 remains gated on the full 20,000-generation run and the fixed 90% criterion.
+
+## Preliminary interpretation
+
+The gentle trajectory should not be described as efficient learning merely
+because it improves on the failed reference. Prior BPTT runs mastered the
+harder initial `(16,1)` stage in 500--4,500 updates, including
+[`6llb1eju`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/6llb1eju)
+at generation 500 and
+[`4zaw3lt7`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/4zaw3lt7)
+at generation 1,100. This establishes that the task and model architecture are
+learnable; the slow gentle result is specific to the EGGROLL optimization.
+
+The model has 1,060,928 parameters. Its independent 8,192-token input and
+output weight tables contain 1,048,576 of them (98.84%). Generic MQAR retrieval
+requires the hidden representation induced by a random value token to align
+with that same token's output row. Standardized EGGROLL estimates this
+coordination from one scalar fitness per candidate while applying independent
+rank-1 perturbations to both large matrices. A plausible explanation is that
+useful changes on either side have weak reward until the other side is already
+aligned. This hypothesis fits the observed slow loss reduction, but the
+curriculum experiment does not isolate or prove it. Weight tying would be a
+useful follow-up ablation after this bounded protocol, not a change to the
+active run.
