@@ -99,10 +99,15 @@ def _population_affine(
     *,
     bias: Tensor | None = None,
     bias_name: str | None = None,
+    transpose_noise: bool = False,
 ) -> Tensor:
     factors = noise.matrices[weight_name]
-    left = _signed_pair(factors.left)
-    right = _repeated_pair(factors.right)
+    if transpose_noise:
+        left = _signed_pair(factors.right)
+        right = _repeated_pair(factors.left)
+    else:
+        left = _signed_pair(factors.left)
+        right = _repeated_pair(factors.right)
     base = F.linear(inputs, weight, bias)
     if inputs.ndim == 2:
         outputs = base.unsqueeze(0).expand(noise.population_size, -1, -1).clone()
@@ -124,6 +129,36 @@ def _population_affine(
             raise ValueError("bias_name is required when a bias is provided")
         outputs.add_(_signed_pair(noise.vectors[bias_name])[:, None], alpha=sigma)
     return outputs
+
+
+def _population_output_affine(
+    model: VanillaRNN,
+    inputs: Tensor,
+    noise: AntitheticNoise,
+    sigma: float,
+) -> Tensor:
+    """Apply each candidate's output projection, preserving exact weight tying."""
+
+    if model.tie_input_output:
+        return _population_affine(
+            inputs,
+            model.input_weight.transpose(0, 1),
+            "input_weight",
+            noise,
+            sigma,
+            bias=model.output_bias,
+            bias_name="output_bias",
+            transpose_noise=True,
+        )
+    return _population_affine(
+        inputs,
+        model.output_weight,
+        "output_weight",
+        noise,
+        sigma,
+        bias=model.output_bias,
+        bias_name="output_bias",
+    )
 
 
 def _population_embedding(
@@ -206,29 +241,15 @@ def population_forward(
         hidden = torch.tanh(input_term + recurrent_term)
         if readout_mask is not None and readout_mask[:, time].any():
             selected_logits.append(
-                _population_affine(
-                    hidden[:, readout_mask[:, time]],
-                    model.output_weight,
-                    "output_weight",
-                    noise,
-                    sigma,
-                    bias=model.output_bias,
-                    bias_name="output_bias",
+                _population_output_affine(
+                    model, hidden[:, readout_mask[:, time]], noise, sigma,
                 )
             )
     if readout_mask is not None:
         if not selected_logits:
             raise ValueError("readout_mask must select at least one position")
         return torch.cat(selected_logits, dim=1)
-    return _population_affine(
-        hidden,
-        model.output_weight,
-        "output_weight",
-        noise,
-        sigma,
-        bias=model.output_bias,
-        bias_name="output_bias",
-    )
+    return _population_output_affine(model, hidden, noise, sigma)
 
 
 def slice_pair_noise(noise: AntitheticNoise, start: int, end: int) -> AntitheticNoise:
@@ -268,15 +289,7 @@ def _population_readout_sums(
     noise: AntitheticNoise,
     sigma: float,
 ) -> tuple[Tensor, Tensor]:
-    logits = _population_affine(
-        states,
-        model.output_weight,
-        "output_weight",
-        noise,
-        sigma,
-        bias=model.output_bias,
-        bias_name="output_bias",
-    ).float()
+    logits = _population_output_affine(model, states, noise, sigma).float()
     target_logits = logits.gather(
         -1,
         targets[None, :, None].expand(noise.population_size, -1, 1),
@@ -343,14 +356,8 @@ def _grouped_population_loss_and_accuracy(
     correct_counts = model.input_weight.new_zeros(noise.population_size)
     for start in range(0, query_count, 8):
         end = min(start + 8, query_count)
-        logits = _population_affine(
-            readout_states[:, start:end],
-            model.output_weight,
-            "output_weight",
-            noise,
-            sigma,
-            bias=model.output_bias,
-            bias_name="output_bias",
+        logits = _population_output_affine(
+            model, readout_states[:, start:end], noise, sigma,
         ).float()
         selected_targets = readout_targets[:, start:end]
         target_logits = logits.gather(-1, selected_targets[..., None]).squeeze(-1)

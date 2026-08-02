@@ -6,15 +6,21 @@ with_gpu="${WITH_GPU:-/store/store5/software/simple-gpu-schedule/with-gpu}"
 gpu_pool="${GPU_POOL:-all}"
 seed="${SEED:-7}"
 schedules="${SCHEDULES:-reference gentle}"
+tie_input_output="${TIE_INPUT_OUTPUT:-0}"
 
 if [[ "$seed" != 7 && "$seed" != 8 ]]; then
     echo "SEED must be 7 or the predeclared confirmation seed 8" >&2
     exit 2
 fi
+if [[ "$tie_input_output" != 0 && "$tie_input_output" != 1 ]]; then
+    echo "TIE_INPUT_OUTPUT must be 0 or 1" >&2
+    exit 2
+fi
 
 if [[ "${GENTLE_CURRICULUM_ON_GPU:-0}" != 1 ]]; then
     exec "$with_gpu" "$gpu_pool" --num 1 -- env \
-        GENTLE_CURRICULUM_ON_GPU=1 SEED="$seed" bash "$0" "$@"
+        GENTLE_CURRICULUM_ON_GPU=1 SEED="$seed" \
+        TIE_INPUT_OUTPUT="$tie_input_output" bash "$0" "$@"
 fi
 
 cd "$repo_root"
@@ -26,8 +32,14 @@ mkdir -p "$output_root"
 
 run_schedule() {
     local schedule=$1
-    local name="gentle-curriculum-${schedule}-seed${seed}-20k"
-    local output_dir="$output_root/$schedule"
+    local variant="$schedule"
+    local tied_args=()
+    if [[ "$tie_input_output" == 1 ]]; then
+        variant="${schedule}-tied"
+        tied_args+=(--tie-input-output)
+    fi
+    local name="gentle-curriculum-${variant}-seed${seed}-20k"
+    local output_dir="$output_root/$variant"
 
     if [[ -f "$output_dir/metrics.json" ]]; then
         echo "Skipping completed run: $name"
@@ -44,6 +56,7 @@ run_schedule() {
         --generations 20000 \
         --batch-size 64 \
         --hidden-size 64 \
+        "${tied_args[@]}" \
         --population-size 8192 \
         --population-chunk-size 1024 \
         --population-data-mode cartesian \

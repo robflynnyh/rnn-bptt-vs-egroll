@@ -45,9 +45,12 @@ def functional_rnn_forward(
 
     stacked_states = torch.stack(states, dim=1) if states else None
     readout_states = hidden if readout_mask is None else stacked_states[readout_mask]
-    logits = F.linear(
-        readout_states, parameters["output_weight"], parameters["output_bias"],
+    output_weight = (
+        parameters["input_weight"].transpose(0, 1)
+        if "output_weight" not in parameters
+        else parameters["output_weight"]
     )
+    logits = F.linear(readout_states, output_weight, parameters["output_bias"])
     if not return_states:
         return logits
     assert stacked_states is not None
@@ -58,7 +61,12 @@ class VanillaRNN(nn.Module):
     """Single-layer Elman RNN with one-hot-equivalent token inputs."""
 
     def __init__(
-        self, vocab_size: int, hidden_size: int, *, recurrent_radius: float = 0.9,
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        *,
+        recurrent_radius: float = 0.9,
+        tie_input_output: bool = False,
     ) -> None:
         super().__init__()
         if min(vocab_size, hidden_size) < 1:
@@ -68,10 +76,12 @@ class VanillaRNN(nn.Module):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.recurrent_radius = recurrent_radius
+        self.tie_input_output = tie_input_output
         self.input_weight = nn.Parameter(torch.empty(hidden_size, vocab_size))
         self.recurrent_weight = nn.Parameter(torch.empty(hidden_size, hidden_size))
         self.hidden_bias = nn.Parameter(torch.zeros(hidden_size))
-        self.output_weight = nn.Parameter(torch.empty(vocab_size, hidden_size))
+        if not tie_input_output:
+            self.output_weight = nn.Parameter(torch.empty(vocab_size, hidden_size))
         self.output_bias = nn.Parameter(torch.zeros(vocab_size))
         self.reset_parameters()
 
@@ -80,11 +90,12 @@ class VanillaRNN(nn.Module):
         nn.init.orthogonal_(self.recurrent_weight)
         with torch.no_grad():
             self.recurrent_weight.mul_(self.recurrent_radius)
-        nn.init.uniform_(
-            self.output_weight,
-            -1 / math.sqrt(self.hidden_size),
-            1 / math.sqrt(self.hidden_size),
-        )
+        if not self.tie_input_output:
+            nn.init.uniform_(
+                self.output_weight,
+                -1 / math.sqrt(self.hidden_size),
+                1 / math.sqrt(self.hidden_size),
+            )
         nn.init.zeros_(self.hidden_bias)
         nn.init.zeros_(self.output_bias)
 

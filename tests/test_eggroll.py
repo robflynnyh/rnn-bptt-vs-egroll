@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import pytest
 
 from rnn_bptt_vs_eggroll.eggroll import (
     AntitheticNoise,
@@ -15,9 +16,12 @@ from rnn_bptt_vs_eggroll.eggroll import (
 from rnn_bptt_vs_eggroll.model import VanillaRNN, functional_rnn_forward
 
 
-def test_population_forward_matches_materialized_candidates() -> None:
+@pytest.mark.parametrize("tie_input_output", [False, True])
+def test_population_forward_matches_materialized_candidates(
+    tie_input_output: bool,
+) -> None:
     torch.manual_seed(10)
-    model = VanillaRNN(11, 4)
+    model = VanillaRNN(11, 4, tie_input_output=tie_input_output)
     inputs = torch.randint(11, (2, 6))
     noise = sample_antithetic_noise(
         model, population_size=6, rank=2, generator=torch.Generator().manual_seed(11),
@@ -68,9 +72,12 @@ def test_chunked_population_preserves_antithetic_order() -> None:
     assert torch.equal(accuracies, expected_accuracies)
 
 
-def test_grouped_population_matches_materialized_candidates() -> None:
+@pytest.mark.parametrize("tie_input_output", [False, True])
+def test_grouped_population_matches_materialized_candidates(
+    tie_input_output: bool,
+) -> None:
     torch.manual_seed(21)
-    model = VanillaRNN(7, 3)
+    model = VanillaRNN(7, 3, tie_input_output=tie_input_output)
     inputs = torch.randint(7, (2, 6))
     targets = torch.full((2, 6), -100)
     targets[0, 2] = 3

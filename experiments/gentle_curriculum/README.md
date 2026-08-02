@@ -58,6 +58,18 @@ bash scripts/run_gentle_curriculum_comparison.sh
 To run only one side while preserving the same configuration, set
 `SCHEDULES=reference` or `SCHEDULES=gentle`.
 
+The exact input/output weight-tying follow-up uses the same command with:
+
+```bash
+SCHEDULES=gentle TIE_INPUT_OUTPUT=1 bash scripts/run_gentle_curriculum_comparison.sh
+```
+
+This reuses the input table, transposed, as the output classifier. Candidate
+perturbations are tied too: EGGROLL samples one rank-1 change to the shared
+table and uses its exact transpose at the output. The tied run has 536,640
+parameters rather than 1,060,928. It is an architecture ablation, not the
+schedule-only treatment specified by the original comparison.
+
 If and only if the strict promotion rule passes, run seed 8 with:
 
 ```bash
@@ -75,7 +87,8 @@ decisions, and conclusions will be added after the bounded runs complete.
 | Scheduled-LR reference evidence | 7 | Reference | 14,392 | [`ceijp8r1`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/ceijp8r1) | Ran until manually stopped |
 | Long reference evidence | 7 | Reference | 83,662 | [`gunzsjri`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/gunzsjri) | Ran until manually stopped |
 | Exact duplicate reference | 7 | Reference | 4,290 | [`59vrqlqz`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/59vrqlqz) | Intentionally stopped as redundant |
-| Bounded treatment | 7 | Gentle | 20,000 target | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Running |
+| Untied treatment | 7 | Gentle | 13,200 | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Intentionally stopped for tied ablation |
+| Tied follow-up | 7 | Gentle, tied input/output | 20,000 target | Pending | Pending |
 
 The scheduled-LR reference used the same seed, model, Cartesian population,
 batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
@@ -99,7 +112,11 @@ generation 4,290. It was stopped once the prior long reference run was
 identified, before the launcher could start the gentle treatment. The gentle
 run is therefore the only remaining seed-7 compute. This execution decision
 was made to avoid repeating an already established negative control; the
-learning-rate difference is retained as a comparison limitation.
+learning-rate difference is retained as a comparison limitation. The untied
+gentle treatment then remained at `(4,1)` through generation 13,200. Its final
+fixed-probe accuracy was 9.18%, and its best observed fixed-probe accuracy was
+10.94%. It was stopped at the user's request to test exact input/output weight
+tying, which directly targets the coordination bottleneck described below.
 
 ## Interim matched diagnostics
 

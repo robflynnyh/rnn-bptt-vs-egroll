@@ -108,6 +108,7 @@ class ExperimentConfig:
     random_non_queries: bool = False
     hidden_size: int = 64
     recurrent_radius: float = 0.9
+    tie_input_output: bool = False
     population_size: int = 16_384
     population_chunk_size: int = 1_024
     population_data_mode: str = "cartesian"
@@ -897,6 +898,7 @@ def run_experiment(
     torch.manual_seed(config.seed)
     model = VanillaRNN(
         config.vocab_size, config.hidden_size, recurrent_radius=config.recurrent_radius,
+        tie_input_output=config.tie_input_output,
     ).to(device)
     _broadcast_model(model)
     initial_checksum = _state_checksum(model)
@@ -1156,6 +1158,7 @@ def run_experiment(
             "architecture": "single_layer_tanh_elman_rnn",
             "vocab_size": task_config.vocab_size,
             "hidden_size": config.hidden_size,
+            "tie_input_output": config.tie_input_output,
             "parameter_count": model.parameter_count,
             "initial_checksum": initial_checksum,
         },
@@ -1254,6 +1257,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-size", type=int)
     parser.add_argument("--recurrent-radius", type=float)
     parser.add_argument(
+        "--tie-input-output", action=argparse.BooleanOptionalAction, default=None,
+    )
+    parser.add_argument(
         "--curriculum", action=argparse.BooleanOptionalAction, default=None,
     )
     parser.add_argument(
@@ -1324,6 +1330,7 @@ def _apply_cli_overrides(
         "population_precision",
         "hidden_size",
         "recurrent_radius",
+        "tie_input_output",
         "curriculum_sequence_lengths",
         "curriculum_num_kv_pairs",
         "curriculum_accuracy_threshold",
