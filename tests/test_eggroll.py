@@ -2,6 +2,10 @@ import torch
 import torch.nn.functional as F
 
 from rnn_bptt_vs_eggroll.eggroll import (
+    AntitheticNoise,
+    MatrixFactors,
+    assign_maximization_gradients,
+    estimate_elite_centroid_directions,
     evaluate_population,
     materialize_candidate_parameters,
     population_forward,
@@ -128,3 +132,55 @@ def test_antithetic_sign_fitness_keeps_only_pairwise_winner() -> None:
     losses = torch.tensor([1.0, 4.0, 2.0, 3.0, 2.0, 2.0])
     fitness = shape_fitness(losses, "antithetic-sign")
     assert torch.equal(fitness, torch.tensor([1.0, -1.0, 0.0, -1.0, 1.0, -0.0]))
+
+
+def test_elite_centroid_selects_unique_pair_winners_with_correct_sign() -> None:
+    noise = AntitheticNoise(
+        matrices={
+            "weight": MatrixFactors(
+                left=torch.tensor([[[1.0]], [[2.0]], [[3.0]]]),
+                right=torch.ones(3, 1, 1),
+            ),
+        },
+        vectors={"bias": torch.tensor([[10.0], [20.0], [30.0]])},
+        rank=1,
+    )
+    # Pair winners are +E0 (loss 1), -E1 (loss 2), and +E2 (loss 3).
+    losses = torch.tensor([1.0, 5.0, 3.0, 2.0, 2.0, 4.0])
+
+    directions, selected = estimate_elite_centroid_directions(
+        noise, losses, elite_count=2,
+    )
+
+    assert torch.equal(selected, torch.tensor([0, 4]))
+    assert torch.equal(directions["weight"], torch.tensor([[-0.5]]))
+    assert torch.equal(directions["bias"], torch.tensor([-5.0]))
+
+
+def test_elite_centroid_update_moves_by_commit_fraction_of_candidate_radius() -> None:
+    model = torch.nn.Linear(1, 1, bias=False)
+    torch.nn.init.zeros_(model.weight)
+    noise = AntitheticNoise(
+        matrices={
+            "weight": MatrixFactors(
+                left=torch.tensor([[[1.0]], [[2.0]], [[3.0]]]),
+                right=torch.ones(3, 1, 1),
+            ),
+        },
+        vectors={},
+        rank=1,
+    )
+    losses = torch.tensor([1.0, 5.0, 3.0, 2.0, 2.0, 4.0])
+    directions, _ = estimate_elite_centroid_directions(
+        noise, losses, elite_count=2,
+    )
+    sigma = 0.1
+    commit_scale = 0.2
+    optimizer = torch.optim.SGD(model.parameters(), lr=commit_scale)
+
+    assign_maximization_gradients(
+        model, {name: sigma * value for name, value in directions.items()},
+    )
+    optimizer.step()
+
+    assert torch.allclose(model.weight, torch.tensor([[-0.01]]))

@@ -161,6 +161,10 @@ reference in the initial MQAR comparison:
 bash scripts/launch_eggroll_zoology_grouped_sign.sh
 ```
 
+The bounded optimizer and elite-centroid tuning protocol is documented in
+[`experiments/eggroll_tuning/README.md`](experiments/eggroll_tuning/README.md).
+Its launcher runs exactly ten 2,000-generation screens sequentially on one GPU.
+
 Population evaluation is chunked to control the large vocabulary readout. It
 can also be sharded while retaining global fitness shaping:
 

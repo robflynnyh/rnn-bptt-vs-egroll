@@ -19,6 +19,7 @@ from torch import Tensor
 
 from .eggroll import (
     assign_maximization_gradients,
+    estimate_elite_centroid_directions,
     estimate_reward_gradients,
     evaluate_population,
     gradient_rms,
@@ -67,6 +68,9 @@ class ExperimentConfig:
     sigma: float = 0.005
     sigma_decay: float = 1.0
     fitness_shaping: str = "zscore"
+    eggroll_update_rule: str = "standardized"
+    elite_count: int = 8
+    elite_commit_scale: float = 0.03
     eggroll_learning_rate: float = 0.3
     eggroll_learning_rate_decay: float = 1.0
     eggroll_learning_rate_final: float | None = None
@@ -160,6 +164,15 @@ class ExperimentConfig:
             "zscore", "centered-rank", "centered", "antithetic-sign",
         }:
             raise ValueError("unknown fitness shaping")
+        if self.eggroll_update_rule not in {"standardized", "elite-centroid"}:
+            raise ValueError("unknown EGGROLL update rule")
+        if (
+            self.eggroll_update_rule == "elite-centroid"
+            and not 1 <= self.elite_count <= self.population_size // 2
+        ):
+            raise ValueError("elite_count must fit the antithetic directions")
+        if self.elite_commit_scale <= 0:
+            raise ValueError("elite_commit_scale must be positive")
         rates = (self.eggroll_learning_rate, self.bptt_learning_rate)
         if any(value <= 0 for value in rates):
             raise ValueError("learning rates must be positive")
@@ -180,10 +193,9 @@ class ExperimentConfig:
                     "EGGROLL learning-rate decay start must precede the final generation"
                 )
             decay_end = self.eggroll_learning_rate_decay_end or self.generations
-            if not self.eggroll_learning_rate_decay_start < decay_end <= self.generations:
+            if not self.eggroll_learning_rate_decay_start < decay_end:
                 raise ValueError(
-                    "EGGROLL learning-rate decay end must follow its start and not "
-                    "exceed the final generation"
+                    "EGGROLL learning-rate decay end must follow its start"
                 )
         if min(self.eggroll_weight_decay, self.bptt_weight_decay) < 0:
             raise ValueError("weight decay must be non-negative")
@@ -417,6 +429,25 @@ def _parameter_l2_norm(model: VanillaRNN) -> float:
     )
 
 
+def _parameter_rms(model: VanillaRNN) -> float:
+    squared_sum = sum(
+        parameter.detach().float().square().sum() for parameter in model.parameters()
+    )
+    count = sum(parameter.numel() for parameter in model.parameters())
+    return float(torch.sqrt(squared_sum / count))
+
+
+def _parameter_update_rms(
+    model: VanillaRNN, before: dict[str, Tensor],
+) -> float:
+    squared_sum = sum(
+        (parameter.detach().float() - before[name]).square().sum()
+        for name, parameter in model.named_parameters()
+    )
+    count = sum(parameter.numel() for parameter in model.parameters())
+    return float(torch.sqrt(squared_sum / count))
+
+
 def _model_gradient_rms(model: VanillaRNN) -> float:
     gradients = {
         name: parameter.grad
@@ -514,6 +545,8 @@ def _eggroll_update(
     perturbation_rank: int,
     sigma: float,
     fitness_shaping: str,
+    update_rule: str,
+    elite_count: int,
     population_data_mode: str,
     population_precision: str,
     noise_generator: torch.Generator,
@@ -539,14 +572,25 @@ def _eggroll_update(
             (local_losses[: noise.pair_count] - local_losses[noise.pair_count :]).abs()
         )
         global_fitness = shape_fitness(global_losses, fitness_shaping)
-        shard_start = _rank() * local_population_size
-        local_fitness = global_fitness[
-            shard_start : shard_start + local_population_size
-        ]
-        raw_reward_gradients = estimate_reward_gradients(noise, local_fitness)
-        _average_gradients(raw_reward_gradients)
-        # This is the update scaling used by the working spiral implementation.
-        gradient_scale = sigma * math.sqrt(global_population_size)
+        selected_elites = None
+        if update_rule == "elite-centroid":
+            if _world_size() != 1:
+                raise ValueError("elite-centroid currently requires one worker")
+            raw_reward_gradients, selected_elites = (
+                estimate_elite_centroid_directions(
+                    noise, global_losses, elite_count=elite_count,
+                )
+            )
+            gradient_scale = sigma
+        else:
+            shard_start = _rank() * local_population_size
+            local_fitness = global_fitness[
+                shard_start : shard_start + local_population_size
+            ]
+            raw_reward_gradients = estimate_reward_gradients(noise, local_fitness)
+            _average_gradients(raw_reward_gradients)
+            # This is the update scaling used by the working spiral implementation.
+            gradient_scale = sigma * math.sqrt(global_population_size)
         reward_gradients = {
             name: value * gradient_scale for name, value in raw_reward_gradients.items()
         }
@@ -559,9 +603,21 @@ def _eggroll_update(
             mean_logits.argmax(dim=-1).eq(supervised_targets).float().mean()
         )
 
+    parameters_before = {
+        name: parameter.detach().float().clone()
+        for name, parameter in model.named_parameters()
+    }
+    parameter_rms_before = _parameter_rms(model)
     optimizer.zero_grad(set_to_none=True)
     assign_maximization_gradients(model, reward_gradients)
     optimizer.step()
+    parameter_update_rms = _parameter_update_rms(model, parameters_before)
+    selected_elite_count = 0 if selected_elites is None else selected_elites.numel()
+    elite_positive_fraction = (
+        0.0
+        if selected_elites is None
+        else float(selected_elites.lt(noise.pair_count).float().mean())
+    )
     return {
         "mean_model_batch_loss": mean_loss_before,
         "mean_model_batch_accuracy": mean_accuracy_before,
@@ -573,6 +629,18 @@ def _eggroll_update(
         "gradient_scale": gradient_scale,
         "raw_gradient_rms": gradient_rms(raw_reward_gradients),
         "gradient_rms": gradient_rms(reward_gradients),
+        "parameter_rms_before_update": parameter_rms_before,
+        "parameter_update_rms": parameter_update_rms,
+        "update_to_parameter_rms_ratio": (
+            parameter_update_rms / parameter_rms_before
+            if parameter_rms_before
+            else 0.0
+        ),
+        "update_rule_standardized": float(update_rule == "standardized"),
+        "update_rule_elite_centroid": float(update_rule == "elite-centroid"),
+        "selected_elite_count": float(selected_elite_count),
+        "elite_fraction": float(selected_elite_count / noise.pair_count),
+        "elite_positive_fraction": elite_positive_fraction,
         "grouped_data": float(population_data_mode == "grouped"),
         "bfloat16_forward": float(population_precision == "bfloat16"),
         "unique_examples": float(inputs.shape[0]),
@@ -747,7 +815,11 @@ def run_experiment(
     else:
         optimizer = torch.optim.SGD(
             model.parameters(),
-            lr=config.eggroll_learning_rate,
+            lr=(
+                config.elite_commit_scale
+                if config.eggroll_update_rule == "elite-centroid"
+                else config.eggroll_learning_rate
+            ),
             momentum=config.eggroll_momentum,
             weight_decay=config.eggroll_weight_decay,
         )
@@ -839,7 +911,11 @@ def run_experiment(
     current_sigma = config.sigma
     experiment_start = time.perf_counter()
     for generation in range(1, config.generations + 1):
-        if config.method == "eggroll" and config.eggroll_learning_rate_final is not None:
+        if (
+            config.method == "eggroll"
+            and config.eggroll_update_rule == "standardized"
+            and config.eggroll_learning_rate_final is not None
+        ):
             optimizer.param_groups[0]["lr"] = scheduled_eggroll_learning_rate(
                 config, generation,
             )
@@ -872,6 +948,8 @@ def run_experiment(
                 perturbation_rank=config.perturbation_rank,
                 sigma=current_sigma,
                 fitness_shaping=config.fitness_shaping,
+                update_rule=config.eggroll_update_rule,
+                elite_count=config.elite_count,
                 population_data_mode=config.population_data_mode,
                 population_precision=config.population_precision,
                 noise_generator=noise_generator,
@@ -922,7 +1000,10 @@ def run_experiment(
         current_sigma *= config.sigma_decay
         if config.method == "eggroll":
             if config.eggroll_learning_rate_final is None:
-                optimizer.param_groups[0]["lr"] *= config.eggroll_learning_rate_decay
+                if config.eggroll_update_rule == "standardized":
+                    optimizer.param_groups[0]["lr"] *= (
+                        config.eggroll_learning_rate_decay
+                    )
         else:
             optimizer.param_groups[0]["lr"] *= config.bptt_learning_rate_decay
         if (
@@ -1058,6 +1139,11 @@ def _parser() -> argparse.ArgumentParser:
         "--fitness-shaping",
         choices=("zscore", "centered-rank", "centered", "antithetic-sign"),
     )
+    parser.add_argument(
+        "--eggroll-update-rule", choices=("standardized", "elite-centroid"),
+    )
+    parser.add_argument("--elite-count", type=int)
+    parser.add_argument("--elite-commit-scale", type=float)
     parser.add_argument("--eggroll-learning-rate", type=float)
     parser.add_argument("--eggroll-learning-rate-decay", type=float)
     parser.add_argument("--eggroll-learning-rate-final", type=float)
@@ -1110,6 +1196,9 @@ def _apply_cli_overrides(
         "sigma_decay",
         "perturbation_rank",
         "fitness_shaping",
+        "eggroll_update_rule",
+        "elite_count",
+        "elite_commit_scale",
         "eggroll_learning_rate",
         "eggroll_learning_rate_decay",
         "eggroll_learning_rate_final",

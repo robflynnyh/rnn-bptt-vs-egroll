@@ -53,6 +53,21 @@ def test_eggroll_learning_rate_holds_at_floor_after_decay() -> None:
     assert scheduled_eggroll_learning_rate(config, 200) == pytest.approx(0.01)
 
 
+def test_short_screen_can_use_prefix_of_long_run_schedule() -> None:
+    config = replace(
+        smoke_config(),
+        generations=20,
+        eggroll_learning_rate=0.3,
+        eggroll_learning_rate_final=0.01,
+        eggroll_learning_rate_decay_start=0,
+        eggroll_learning_rate_decay_end=100_000,
+    )
+
+    assert scheduled_eggroll_learning_rate(config, 20) == pytest.approx(
+        0.2999999714,
+    )
+
+
 def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
     base_config = replace(
         smoke_config(seed=13),
@@ -102,6 +117,35 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
         results["bptt"]["model"]["initial_checksum"]
         == results["eggroll"]["model"]["initial_checksum"]
     )
+
+
+def test_elite_experiment_logs_selection_and_actual_update(tmp_path) -> None:
+    config = replace(
+        smoke_config(seed=19),
+        method="eggroll",
+        generations=1,
+        evaluation_interval=1,
+        evaluation_examples=4,
+        test_examples=4,
+        curriculum_probe_examples=4,
+        population_size=4,
+        population_chunk_size=2,
+        eggroll_update_rule="elite-centroid",
+        elite_count=1,
+        elite_commit_scale=0.2,
+    )
+
+    result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
+
+    assert result is not None
+    metrics = result["update_history"][0]["metrics"]
+    assert metrics["update_rule_standardized"] == 0
+    assert metrics["update_rule_elite_centroid"] == 1
+    assert metrics["selected_elite_count"] == 1
+    assert metrics["elite_fraction"] == 0.5
+    assert 0 <= metrics["elite_positive_fraction"] <= 1
+    assert metrics["parameter_update_rms"] > 0
+    assert metrics["update_to_parameter_rms_ratio"] > 0
 
 
 def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:

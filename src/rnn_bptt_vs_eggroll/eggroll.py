@@ -551,6 +551,50 @@ def estimate_reward_gradients(
     return gradients
 
 
+def estimate_elite_centroid_directions(
+    noise: AntitheticNoise,
+    losses: Tensor,
+    *,
+    elite_count: int,
+) -> tuple[dict[str, Tensor], Tensor]:
+    """Average the winning signs from the best unique antithetic directions."""
+
+    if losses.shape != (noise.population_size,):
+        raise ValueError("losses must have one value per population member")
+    if not 1 <= elite_count <= noise.pair_count:
+        raise ValueError("elite_count must fit the antithetic directions")
+    positive_losses = losses[: noise.pair_count]
+    negative_losses = losses[noise.pair_count :]
+    prefer_positive = positive_losses <= negative_losses
+    preferred_losses = torch.minimum(positive_losses, negative_losses)
+    elite_pairs = preferred_losses.topk(elite_count, largest=False).indices
+    elite_signs = torch.where(
+        prefer_positive[elite_pairs],
+        torch.ones_like(preferred_losses[elite_pairs]),
+        -torch.ones_like(preferred_losses[elite_pairs]),
+    )
+    directions: dict[str, Tensor] = {}
+    for name, factors in noise.matrices.items():
+        directions[name] = torch.einsum(
+            "p,por,pir->oi",
+            elite_signs.to(factors.left.dtype),
+            factors.left[elite_pairs],
+            factors.right[elite_pairs],
+        ) / (elite_count * math.sqrt(noise.rank))
+    for name, values in noise.vectors.items():
+        broadcast_shape = (elite_count,) + (1,) * (values.ndim - 1)
+        directions[name] = (
+            elite_signs.to(values.dtype).reshape(broadcast_shape)
+            * values[elite_pairs]
+        ).mean(dim=0)
+    selected_candidates = torch.where(
+        prefer_positive[elite_pairs],
+        elite_pairs,
+        elite_pairs + noise.pair_count,
+    )
+    return directions, selected_candidates
+
+
 def assign_maximization_gradients(
     model: nn.Module, reward_gradients: dict[str, Tensor],
 ) -> None:
