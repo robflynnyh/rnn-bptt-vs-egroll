@@ -64,6 +64,28 @@ rnn-memory-compare \
 
 `--no-curriculum` trains only the final configured stage. Every validation
 probe and transition is recorded in `metrics.json` and W&B.
+
+### Gentle curriculum
+
+The optional named gentle schedule starts with one KV pair and increases the
+number of available query-distance slots one at a time. Because MQAR requires
+at least four raw tokens, logical query spans 1, 2, 3, and 4 correspond to raw
+token lengths 4, 6, 8, and 10. Select it without changing the reference model
+or optimizer preset:
+
+```bash
+rnn-memory-compare \
+  --method eggroll \
+  --preset reference \
+  --curriculum-schedule gentle
+```
+
+The schedule reaches raw length 16 with one pair and then rejoins the reference
+milestones at `(32,2)`. Raw token length and logical query span are logged
+separately. See the
+[bounded gentle-curriculum study](experiments/gentle_curriculum/README.md) for
+the exact protocol.
+
 Training metrics log independently every generation by default; use
 `--log-interval` to reduce their frequency without changing validation.
 

@@ -5,12 +5,47 @@ import pytest
 import torch
 
 from rnn_bptt_vs_eggroll.experiment import (
+    GENTLE_CURRICULUM,
+    REFERENCE_CURRICULUM,
     CurriculumState,
+    ExperimentConfig,
+    apply_curriculum_schedule,
+    logical_query_span,
     run_experiment,
     scheduled_eggroll_learning_rate,
     smoke_config,
     update_curriculum,
 )
+
+
+def test_logical_query_span_counts_available_query_slots() -> None:
+    assert logical_query_span(4, 1) == 1
+    assert logical_query_span(6, 1) == 2
+    assert logical_query_span(10, 1) == 4
+    assert logical_query_span(32, 2) == 14
+
+    with pytest.raises(ValueError, match="positive integer query span"):
+        logical_query_span(3, 1)
+
+
+def test_named_curriculum_schedules_are_exact() -> None:
+    reference = ExperimentConfig()
+    assert reference.curriculum_schedule == "reference"
+    assert tuple(zip(
+        reference.curriculum_sequence_lengths,
+        reference.curriculum_num_kv_pairs,
+    )) == REFERENCE_CURRICULUM
+
+    gentle = apply_curriculum_schedule(reference, "gentle")
+    assert gentle.curriculum_schedule == "gentle"
+    assert tuple(zip(
+        gentle.curriculum_sequence_lengths,
+        gentle.curriculum_num_kv_pairs,
+    )) == GENTLE_CURRICULUM
+    assert GENTLE_CURRICULUM[:7] == (
+        (4, 1), (6, 1), (8, 1), (10, 1), (12, 1), (14, 1), (16, 1),
+    )
+    assert GENTLE_CURRICULUM[7:] == REFERENCE_CURRICULUM[1:]
 
 
 def test_curriculum_advances_after_one_passing_probe() -> None:
@@ -20,6 +55,8 @@ def test_curriculum_advances_after_one_passing_probe() -> None:
     transition = update_curriculum(state, 0.8, config, generation=2,)
     assert transition is not None
     assert state.current_task(config) == (16, 2)
+    assert transition["from_logical_query_span"] == 3
+    assert transition["to_logical_query_span"] == 6
 
 
 def test_eggroll_learning_rate_holds_then_cosine_decays() -> None:
@@ -78,6 +115,7 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
         evaluation_batch_size=4,
         population_size=4,
         population_chunk_size=2,
+        final_full_curriculum_probe=True,
         curriculum_accuracy_threshold=0.0,
         curriculum_probe_examples=4,
     )
@@ -99,6 +137,8 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
             == expected_candidate_forwards
         )
         assert len(result["test"]["grid"]) == 2
+        assert result["final_curriculum_probe"]["enabled"]
+        assert len(result["final_curriculum_probe"]["grid"]) == 2
         assert {
             row["sequence_length"] for row in result["validation_history"][0]["grid"]
         } == {8}
@@ -109,7 +149,17 @@ def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
         assert len(transitions) == 1
         assert transitions[0]["generation"] == 1
         assert transitions[0]["from_sequence_length"] == 8
+        assert transitions[0]["from_logical_query_span"] == 3
         assert transitions[0]["to_sequence_length"] == 16
+        assert transitions[0]["to_logical_query_span"] == 6
+        assert result["curriculum"]["last_trained_logical_query_span"] == 6
+        assert result["curriculum"]["next_logical_query_span"] == 6
+        assert all(
+            row["logical_query_span"]
+            == logical_query_span(row["sequence_length"], row["num_kv_pairs"])
+            for entry in result["validation_history"]
+            for row in entry["grid"]
+        )
         assert (output_dir / "metrics.json").is_file()
         assert (output_dir / "model.pt").is_file()
 
@@ -189,6 +239,7 @@ def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
         evaluation_examples=4,
         test_examples=4,
         curriculum_probe_examples=4,
+        final_full_curriculum_probe=True,
         wandb_enabled=True,
         wandb_run_name="test-bptt",
     )
@@ -200,7 +251,12 @@ def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
     logged_keys = {key for row in fake_wandb.run.logged for key in row}
     assert "train/batch_loss" in logged_keys
     assert "curriculum/frontier_accuracy" in logged_keys
+    assert "curriculum/logical_query_span" in logged_keys
+    assert "train/sampled_logical_query_span" in logged_keys
+    assert "train/curriculum_logical_query_span" in logged_keys
     assert "validation_grid/seq_len_8/kv_pairs_1/accuracy" in logged_keys
+    assert "validation_grid/seq_len_8/kv_pairs_1/logical_query_span" in logged_keys
+    assert "final_curriculum_probe/seq_len_8/kv_pairs_1/accuracy" in logged_keys
     assert "test_grid/seq_len_8/kv_pairs_1/accuracy" in logged_keys
     assert sum("train/batch_loss" in row for row in fake_wandb.run.logged) == 2
     assert {path.rsplit("/", 1)[-1] for path, _ in fake_wandb.run.saved} == {

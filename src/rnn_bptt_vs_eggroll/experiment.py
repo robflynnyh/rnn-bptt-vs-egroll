@@ -30,6 +30,56 @@ from .model import VanillaRNN
 from .task import IGNORE_INDEX, MQARConfig, sample_batch
 
 
+REFERENCE_CURRICULUM: tuple[tuple[int, int], ...] = (
+    (16, 1),
+    (32, 2),
+    (64, 4),
+    (128, 8),
+    (256, 16),
+    (512, 32),
+    (1_024, 64),
+)
+GENTLE_CURRICULUM: tuple[tuple[int, int], ...] = (
+    (4, 1),
+    (6, 1),
+    (8, 1),
+    (10, 1),
+    (12, 1),
+    (14, 1),
+    *REFERENCE_CURRICULUM,
+)
+CURRICULUM_SCHEDULES = {
+    "reference": REFERENCE_CURRICULUM,
+    "gentle": GENTLE_CURRICULUM,
+}
+
+
+def logical_query_span(sequence_length: int, num_kv_pairs: int) -> int:
+    """Return the number of query-distance slots in an MQAR sequence."""
+
+    remaining_tokens = sequence_length - 2 * num_kv_pairs
+    if remaining_tokens < 2 or remaining_tokens % 2:
+        raise ValueError("MQAR context must leave a positive integer query span")
+    return remaining_tokens // 2
+
+
+def apply_curriculum_schedule(
+    config: "ExperimentConfig", schedule: str,
+) -> "ExperimentConfig":
+    """Return a config using one of the named curriculum schedules."""
+
+    try:
+        tasks = CURRICULUM_SCHEDULES[schedule]
+    except KeyError as error:
+        raise ValueError(f"unknown curriculum schedule: {schedule}") from error
+    return replace(
+        config,
+        curriculum_schedule=schedule,
+        curriculum_sequence_lengths=tuple(length for length, _ in tasks),
+        curriculum_num_kv_pairs=tuple(pairs for _, pairs in tasks),
+    )
+
+
 @dataclass(frozen=True)
 class ExperimentConfig:
     method: str = "bptt"
@@ -37,19 +87,17 @@ class ExperimentConfig:
     generations: int = 3_000
     batch_size: int = 256
     curriculum_enabled: bool = True
-    curriculum_sequence_lengths: tuple[int, ...] = (
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1_024,
+    curriculum_schedule: str = "reference"
+    curriculum_sequence_lengths: tuple[int, ...] = tuple(
+        length for length, _ in REFERENCE_CURRICULUM
     )
-    curriculum_num_kv_pairs: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64)
+    curriculum_num_kv_pairs: tuple[int, ...] = tuple(
+        pairs for _, pairs in REFERENCE_CURRICULUM
+    )
     curriculum_accuracy_threshold: float = 0.9
     curriculum_frontier_probability: float = 0.5
     curriculum_probe_examples: int = 512
+    final_full_curriculum_probe: bool = False
     evaluation_examples: int = 1_024
     test_examples: int = 4_096
     evaluation_batch_size: int = 256
@@ -96,6 +144,10 @@ class ExperimentConfig:
             raise ValueError("generations and batch_size must be positive")
         if not self.curriculum_sequence_lengths:
             raise ValueError("curriculum must contain at least one stage")
+        if self.curriculum_schedule not in {
+            "reference", "gentle", "smoke", "custom",
+        }:
+            raise ValueError("unknown curriculum schedule label")
         if len(self.curriculum_sequence_lengths) != len(self.curriculum_num_kv_pairs):
             raise ValueError("curriculum lengths and pair counts must align")
         if tuple(sorted(set(self.curriculum_sequence_lengths))) != (
@@ -115,6 +167,14 @@ class ExperimentConfig:
             )
         ):
             raise ValueError("every curriculum stage needs context and query slots")
+        tasks = tuple(zip(
+            self.curriculum_sequence_lengths, self.curriculum_num_kv_pairs,
+        ))
+        if (
+            self.curriculum_schedule in CURRICULUM_SCHEDULES
+            and tasks != CURRICULUM_SCHEDULES[self.curriculum_schedule]
+        ):
+            raise ValueError("named curriculum schedule does not match its stages")
         if not 0 <= self.curriculum_accuracy_threshold <= 1:
             raise ValueError("curriculum_accuracy_threshold must be in [0, 1]")
         if not 0 <= self.curriculum_frontier_probability <= 1:
@@ -214,6 +274,7 @@ def smoke_config(seed: int = 7) -> ExperimentConfig:
         seed=seed,
         generations=4,
         batch_size=8,
+        curriculum_schedule="smoke",
         curriculum_sequence_lengths=(8, 16),
         curriculum_num_kv_pairs=(1, 2),
         curriculum_probe_examples=16,
@@ -342,6 +403,9 @@ def _validation_wandb_metrics(entry: dict[str, Any], method: str,) -> dict[str, 
                 "curriculum/sequence_length": float(
                     curriculum["sequence_length_after_probe"]
                 ),
+                "curriculum/logical_query_span": float(
+                    curriculum["logical_query_span_after_probe"]
+                ),
                 "curriculum/num_kv_pairs": float(
                     curriculum["num_kv_pairs_after_probe"]
                 ),
@@ -356,6 +420,9 @@ def _validation_wandb_metrics(entry: dict[str, Any], method: str,) -> dict[str, 
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
+        metrics[f"{prefix}/logical_query_span"] = float(
+            row["logical_query_span"]
+        )
     return metrics
 
 
@@ -364,9 +431,15 @@ def _update_wandb_metrics(entry: dict[str, Any]) -> dict[str, float]:
         "generation": float(entry["generation"]),
         "train/sampled_stage": float(entry["sampled_stage"]),
         "train/sampled_sequence_length": float(entry["sampled_sequence_length"]),
+        "train/sampled_logical_query_span": float(
+            entry["sampled_logical_query_span"]
+        ),
         "train/sampled_num_kv_pairs": float(entry["sampled_num_kv_pairs"]),
         "train/curriculum_stage": float(entry["curriculum_stage"]),
         "train/curriculum_sequence_length": float(entry["curriculum_sequence_length"]),
+        "train/curriculum_logical_query_span": float(
+            entry["curriculum_logical_query_span"]
+        ),
         "train/curriculum_num_kv_pairs": float(entry["curriculum_num_kv_pairs"]),
         "train/unique_sequences_seen": float(entry["unique_training_sequences_seen"]),
         "train/learning_rate": entry["learning_rate"],
@@ -386,6 +459,9 @@ def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
         "curriculum/final_trained_sequence_length": float(
             results["curriculum"]["last_trained_sequence_length"]
         ),
+        "curriculum/final_trained_logical_query_span": float(
+            results["curriculum"]["last_trained_logical_query_span"]
+        ),
         "curriculum/final_trained_num_kv_pairs": float(
             results["curriculum"]["last_trained_num_kv_pairs"]
         ),
@@ -400,6 +476,19 @@ def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
+        metrics[f"{prefix}/logical_query_span"] = float(
+            row["logical_query_span"]
+        )
+    for row in results["final_curriculum_probe"]["grid"]:
+        prefix = (
+            f"final_curriculum_probe/seq_len_{row['sequence_length']}"
+            f"/kv_pairs_{row['num_kv_pairs']}"
+        )
+        metrics[f"{prefix}/accuracy"] = row["accuracy"]
+        metrics[f"{prefix}/loss"] = row["loss"]
+        metrics[f"{prefix}/logical_query_span"] = float(
+            row["logical_query_span"]
+        )
     return metrics
 
 
@@ -489,13 +578,16 @@ def update_curriculum(
     if state.stage == len(config.curriculum_sequence_lengths) - 1:
         return None
     previous_length, previous_pairs = state.current_task(config)
+    previous_span = logical_query_span(previous_length, previous_pairs)
     state.stage += 1
     next_length, next_pairs = state.current_task(config)
     transition = {
         "generation": generation,
         "from_sequence_length": previous_length,
+        "from_logical_query_span": previous_span,
         "from_num_kv_pairs": previous_pairs,
         "to_sequence_length": next_length,
+        "to_logical_query_span": logical_query_span(next_length, next_pairs),
         "to_num_kv_pairs": next_pairs,
         "frontier_accuracy": accuracy,
         "threshold": config.curriculum_accuracy_threshold,
@@ -741,6 +833,9 @@ def evaluate_grid(
                     "method": name,
                     "stage": stage,
                     "sequence_length": sequence_length,
+                    "logical_query_span": logical_query_span(
+                        sequence_length, num_kv_pairs,
+                    ),
                     "num_kv_pairs": num_kv_pairs,
                     "examples": example_count,
                     "supervised_queries": supervised_count,
@@ -852,6 +947,9 @@ def run_experiment(
                 "enabled": config.curriculum_enabled,
                 "stage_before_probe": frontier_stage,
                 "sequence_length_before_probe": frontier_length,
+                "logical_query_span_before_probe": logical_query_span(
+                    frontier_length, frontier_pairs,
+                ),
                 "num_kv_pairs_before_probe": frontier_pairs,
             }
             transition = None
@@ -878,6 +976,9 @@ def run_experiment(
                         "stage_after_probe": curriculum_state.stage,
                         "sequence_length_after_probe": (
                             curriculum_state.current_task(config)[0]
+                        ),
+                        "logical_query_span_after_probe": logical_query_span(
+                            *curriculum_state.current_task(config)
                         ),
                         "num_kv_pairs_after_probe": (
                             curriculum_state.current_task(config)[1]
@@ -976,10 +1077,17 @@ def run_experiment(
                 "generation": generation,
                 "sampled_stage": sampled_stage,
                 "sampled_sequence_length": sequence_length,
+                "sampled_logical_query_span": logical_query_span(
+                    sequence_length, num_kv_pairs,
+                ),
                 "sampled_num_kv_pairs": num_kv_pairs,
                 "curriculum_stage": curriculum_state.stage,
                 "curriculum_sequence_length": (
                     config.curriculum_sequence_lengths[training_frontier]
+                ),
+                "curriculum_logical_query_span": logical_query_span(
+                    config.curriculum_sequence_lengths[training_frontier],
+                    config.curriculum_num_kv_pairs[training_frontier],
                 ),
                 "curriculum_num_kv_pairs": (
                     config.curriculum_num_kv_pairs[training_frontier]
@@ -1028,6 +1136,18 @@ def run_experiment(
         device=device,
         evaluation_stages=tuple(range(last_training_stage + 1)),
     )
+    final_curriculum_probe_grid = (
+        evaluate_grid(
+            {config.method: model},
+            task_config,
+            config,
+            split="validation",
+            example_count=config.curriculum_probe_examples,
+            device=device,
+        )
+        if config.final_full_curriculum_probe
+        else []
+    )
     results: dict[str, Any] = {
         "experiment": "single_method_zoology_mqar_curriculum",
         "method": config.method,
@@ -1071,16 +1191,29 @@ def run_experiment(
             "last_trained_sequence_length": (
                 config.curriculum_sequence_lengths[last_training_stage]
             ),
+            "last_trained_logical_query_span": logical_query_span(
+                config.curriculum_sequence_lengths[last_training_stage],
+                config.curriculum_num_kv_pairs[last_training_stage],
+            ),
             "last_trained_num_kv_pairs": (
                 config.curriculum_num_kv_pairs[last_training_stage]
             ),
             "next_stage": curriculum_state.current_stage(config),
             "next_sequence_length": curriculum_state.current_task(config)[0],
+            "next_logical_query_span": logical_query_span(
+                *curriculum_state.current_task(config)
+            ),
             "next_num_kv_pairs": curriculum_state.current_task(config)[1],
             "final_stage": curriculum_state.stage,
             "transitions": curriculum_state.transitions,
         },
         "test": {"summary": summarize_grid(test_grid), "grid": test_grid,},
+        "final_curriculum_probe": {
+            "enabled": config.final_full_curriculum_probe,
+            "examples": config.curriculum_probe_examples,
+            "summary": summarize_grid(final_curriculum_probe_grid),
+            "grid": final_curriculum_probe_grid,
+        },
         "final_parameter_l2_norm": _parameter_l2_norm(model),
     }
     (output_dir / "metrics.json").write_text(
@@ -1123,11 +1256,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--curriculum", action=argparse.BooleanOptionalAction, default=None,
     )
+    parser.add_argument(
+        "--curriculum-schedule", choices=tuple(CURRICULUM_SCHEDULES),
+    )
     parser.add_argument("--curriculum-sequence-lengths", type=_parse_int_tuple)
     parser.add_argument("--curriculum-num-kv-pairs", type=_parse_int_tuple)
     parser.add_argument("--curriculum-accuracy-threshold", type=float)
     parser.add_argument("--curriculum-frontier-probability", type=float)
     parser.add_argument("--curriculum-probe-examples", type=int)
+    parser.add_argument(
+        "--final-full-curriculum-probe",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--evaluation-examples", type=int)
     parser.add_argument("--test-examples", type=int)
     parser.add_argument("--evaluation-interval", type=int)
@@ -1217,11 +1358,20 @@ def _apply_cli_overrides(
         "wandb_run_name",
         "wandb_group",
     )
+    if args.curriculum_schedule is not None:
+        config = apply_curriculum_schedule(config, args.curriculum_schedule)
     overrides = {
         name: getattr(args, name) for name in names if getattr(args, name) is not None
     }
+    if (
+        args.curriculum_sequence_lengths is not None
+        or args.curriculum_num_kv_pairs is not None
+    ):
+        overrides["curriculum_schedule"] = "custom"
     if args.curriculum is not None:
         overrides["curriculum_enabled"] = args.curriculum
+    if args.final_full_curriculum_probe is not None:
+        overrides["final_full_curriculum_probe"] = args.final_full_curriculum_probe
     if args.random_non_queries is not None:
         overrides["random_non_queries"] = args.random_non_queries
     if args.wandb is not None:
