@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 import sys
 
 import pytest
@@ -317,6 +318,16 @@ def test_completed_run_can_bootstrap_a_longer_target(tmp_path) -> None:
     )
     parent_dir = tmp_path / "parent"
     run_experiment(parent_dir, device=torch.device("cpu"), config=parent_config)
+    metrics_path = parent_dir / "metrics.json"
+    legacy_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    for name in (
+        "adaptive_mutation_scales",
+        "mutation_scale_learning_rate",
+        "mutation_scale_min",
+        "mutation_scale_max",
+    ):
+        legacy_metrics["config"].pop(name)
+    metrics_path.write_text(json.dumps(legacy_metrics), encoding="utf-8")
     continuation = run_experiment(
         tmp_path / "continuation",
         device=torch.device("cpu"),
@@ -324,7 +335,7 @@ def test_completed_run_can_bootstrap_a_longer_target(tmp_path) -> None:
             parent_config,
             generations=3,
             bootstrap_model_path=str(parent_dir / "model.pt"),
-            bootstrap_metrics_path=str(parent_dir / "metrics.json"),
+            bootstrap_metrics_path=str(metrics_path),
         ),
     )
 

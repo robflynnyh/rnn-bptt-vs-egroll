@@ -460,6 +460,12 @@ _RESUME_IGNORED_FIELDS = {
     "checkpoint_interval",
     "log_progress",
 }
+_LEGACY_CONFIG_DEFAULTS = {
+    "adaptive_mutation_scales": False,
+    "mutation_scale_learning_rate": 0.5,
+    "mutation_scale_min": 0.1,
+    "mutation_scale_max": 10.0,
+}
 
 
 def _normalise_config_value(value: Any) -> Any:
@@ -492,7 +498,9 @@ def _load_bootstrap_state(
     parent_config = metrics["config"]
     mismatches = []
     for name in _BOOTSTRAP_MATCH_FIELDS:
-        parent_value = _normalise_config_value(parent_config.get(name))
+        parent_value = _normalise_config_value(
+            parent_config.get(name, _LEGACY_CONFIG_DEFAULTS.get(name))
+        )
         current_value = _normalise_config_value(getattr(config, name))
         if parent_value != current_value:
             mismatches.append(f"{name}: {parent_value!r} != {current_value!r}")
