@@ -142,15 +142,21 @@ rnn-memory-compare \
 The long EGGROLL launcher takes its optimizer configuration from the successful
 progressive sparse-attention experiment in the companion research repository.
 It uses Cartesian `P=8192` by batch-64 evaluation, BF16 candidate forwards,
-rank-1 perturbations, `sigma=0.005`, standardized fitness, SGD learning rate
-`0.3`, no weight decay, and 300,000 generations by default. To reduce the
-constant-step noise floor induced by standardized fitness, the learning rate is
-cosine-decayed immediately from `0.3` to `0.01` over 100,000 generations, then
-held at `0.01` for the remaining 200,000. The population is processed in chunks
-of 1,024 so the configuration fits on one GPU:
+rank-1 perturbations, `sigma=0.005`, antithetic sign fitness, SGD learning rate
+`0.3`, no weight decay, and 300,000 generations by default. The learning rate
+is cosine-decayed immediately from `0.3` to `0.01` over 100,000 generations,
+then held at `0.01` for the remaining 200,000. The population is processed in
+chunks of 1,024 so the configuration fits on one GPU:
 
 ```bash
 bash scripts/launch_eggroll_zoology.sh
+```
+
+The paper-style grouped launcher assigns each antithetic pair to one of 16
+shared examples. This supports `P=131072` in chunks of 8,192 on one 20 GB GPU:
+
+```bash
+bash scripts/launch_eggroll_zoology_grouped_sign.sh
 ```
 
 Population evaluation is chunked to control the large vocabulary readout. It
