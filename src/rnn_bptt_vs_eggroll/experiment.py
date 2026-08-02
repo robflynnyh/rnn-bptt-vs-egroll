@@ -69,6 +69,8 @@ class ExperimentConfig:
     fitness_shaping: str = "zscore"
     eggroll_learning_rate: float = 0.3
     eggroll_learning_rate_decay: float = 1.0
+    eggroll_learning_rate_final: float | None = None
+    eggroll_learning_rate_decay_start: int = 0
     eggroll_weight_decay: float = 0.0
     eggroll_momentum: float = 0.0
     bptt_learning_rate: float = 3e-3
@@ -164,6 +166,16 @@ class ExperimentConfig:
         )
         if any(not 0 < value <= 1 for value in decays):
             raise ValueError("learning-rate decays must be in (0, 1]")
+        if self.eggroll_learning_rate_final is not None:
+            if not 0 < self.eggroll_learning_rate_final <= self.eggroll_learning_rate:
+                raise ValueError(
+                    "final EGGROLL learning rate must be positive and no larger "
+                    "than its initial learning rate"
+                )
+            if not 0 <= self.eggroll_learning_rate_decay_start < self.generations:
+                raise ValueError(
+                    "EGGROLL learning-rate decay start must precede the final generation"
+                )
         if min(self.eggroll_weight_decay, self.bptt_weight_decay) < 0:
             raise ValueError("weight decay must be non-negative")
         if not 0 <= self.eggroll_momentum < 1:
@@ -568,6 +580,22 @@ def _eggroll_update(
     }
 
 
+def scheduled_eggroll_learning_rate(
+    config: ExperimentConfig, generation: int,
+) -> float:
+    """Return the configured hold-then-cosine EGGROLL learning rate."""
+
+    final = config.eggroll_learning_rate_final
+    if final is None or generation <= config.eggroll_learning_rate_decay_start:
+        return config.eggroll_learning_rate
+    progress = (
+        (generation - config.eggroll_learning_rate_decay_start)
+        / (config.generations - config.eggroll_learning_rate_decay_start)
+    )
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return final + (config.eggroll_learning_rate - final) * cosine
+
+
 def _evaluation_seed(
     base_seed: int, split: str, sequence_length: int, num_kv_pairs: int
 ) -> int:
@@ -799,6 +827,10 @@ def run_experiment(
     current_sigma = config.sigma
     experiment_start = time.perf_counter()
     for generation in range(1, config.generations + 1):
+        if config.method == "eggroll" and config.eggroll_learning_rate_final is not None:
+            optimizer.param_groups[0]["lr"] = scheduled_eggroll_learning_rate(
+                config, generation,
+            )
         training_frontier = curriculum_state.current_stage(config)
         last_training_stage = training_frontier
         sampled_stage = _sample_training_stage(
@@ -876,11 +908,11 @@ def run_experiment(
                 print(json.dumps({"update": update_entry}), flush=True)
 
         current_sigma *= config.sigma_decay
-        optimizer.param_groups[0]["lr"] *= (
-            config.eggroll_learning_rate_decay
-            if config.method == "eggroll"
-            else config.bptt_learning_rate_decay
-        )
+        if config.method == "eggroll":
+            if config.eggroll_learning_rate_final is None:
+                optimizer.param_groups[0]["lr"] *= config.eggroll_learning_rate_decay
+        else:
+            optimizer.param_groups[0]["lr"] *= config.bptt_learning_rate_decay
         if (
             generation % config.evaluation_interval == 0
             or generation == config.generations
@@ -1015,6 +1047,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--eggroll-learning-rate", type=float)
     parser.add_argument("--eggroll-learning-rate-decay", type=float)
+    parser.add_argument("--eggroll-learning-rate-final", type=float)
+    parser.add_argument("--eggroll-learning-rate-decay-start", type=int)
     parser.add_argument("--eggroll-weight-decay", type=float)
     parser.add_argument("--eggroll-momentum", type=float)
     parser.add_argument("--bptt-learning-rate", type=float)
@@ -1064,6 +1098,8 @@ def _apply_cli_overrides(
         "fitness_shaping",
         "eggroll_learning_rate",
         "eggroll_learning_rate_decay",
+        "eggroll_learning_rate_final",
+        "eggroll_learning_rate_decay_start",
         "eggroll_weight_decay",
         "eggroll_momentum",
         "bptt_learning_rate",

@@ -143,8 +143,11 @@ The long EGGROLL launcher takes its optimizer configuration from the successful
 progressive sparse-attention experiment in the companion research repository.
 It uses Cartesian `P=8192` by batch-64 evaluation, BF16 candidate forwards,
 rank-1 perturbations, `sigma=0.005`, standardized fitness, SGD learning rate
-`0.3`, no weight decay, and 300,000 generations by default. The population is
-processed in chunks of 1,024 so the configuration fits on one GPU:
+`0.3`, no weight decay, and 300,000 generations by default. To reduce the
+constant-step noise floor induced by standardized fitness, the learning rate is
+held at `0.3` for 50,000 generations and then cosine-decayed to `0.01`. The
+population is processed in chunks of 1,024 so the configuration fits on one
+GPU:
 
 ```bash
 bash scripts/launch_eggroll_zoology.sh

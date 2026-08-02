@@ -1,11 +1,13 @@
 from dataclasses import replace
 import sys
 
+import pytest
 import torch
 
 from rnn_bptt_vs_eggroll.experiment import (
     CurriculumState,
     run_experiment,
+    scheduled_eggroll_learning_rate,
     smoke_config,
     update_curriculum,
 )
@@ -18,6 +20,21 @@ def test_curriculum_advances_after_one_passing_probe() -> None:
     transition = update_curriculum(state, 0.8, config, generation=2,)
     assert transition is not None
     assert state.current_task(config) == (16, 2)
+
+
+def test_eggroll_learning_rate_holds_then_cosine_decays() -> None:
+    config = replace(
+        smoke_config(),
+        generations=100,
+        eggroll_learning_rate=0.3,
+        eggroll_learning_rate_final=0.01,
+        eggroll_learning_rate_decay_start=20,
+    )
+
+    assert scheduled_eggroll_learning_rate(config, 1) == 0.3
+    assert scheduled_eggroll_learning_rate(config, 20) == 0.3
+    assert scheduled_eggroll_learning_rate(config, 60) == pytest.approx(0.155)
+    assert scheduled_eggroll_learning_rate(config, 100) == pytest.approx(0.01)
 
 
 def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:
