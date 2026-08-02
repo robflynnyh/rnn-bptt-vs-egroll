@@ -93,3 +93,22 @@ identified, before the launcher could start the gentle treatment. The gentle
 run is therefore the only remaining seed-7 compute. This execution decision
 was made to avoid repeating an already established negative control; the
 learning-rate difference is retained as a comparison limitation.
+
+## Interim matched diagnostics
+
+These values compare the existing reference and gentle treatment at the same
+generation. Accuracy is from each run's fixed 512-example frontier probe. The
+tasks differ here by design: reference probes `(16,1)`, while gentle is still
+probing `(4,1)`. They therefore diagnose optimization trajectory rather than
+the predeclared common-milestone outcome.
+
+| Generation | Reference train loss | Reference probe | Gentle train loss | Gentle probe |
+|---:|---:|---:|---:|---:|
+| 1,000 | 8.8205 | 0.000% | 8.7043 | 0.195% |
+| 2,000 | 8.5307 | 0.000% | 8.4401 | 0.000% |
+| 4,000 | 8.4220 | 0.000% | 8.0334 | 0.781% |
+| 6,000 | 8.3976 | 0.000% | 7.6883 | 2.148% |
+
+The gentle run has a clearly better early optimization trajectory, but this is
+not yet evidence that it masters a higher common milestone. The primary result
+remains gated on the full 20,000-generation run and the fixed 90% criterion.
