@@ -90,7 +90,8 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --wandb-entity wobrob101 \
     --wandb-run-name gentle-curriculum-gentle-tied-seed7-2m-continuation \
     --wandb-group eggroll-mqar-gentle-curriculum-long-seed7 \
-    --wandb-run-id tied2m07 \
+    --wandb-run-id tied2m7b \
     --wandb-resume allow \
+    --wandb-log-interval 1 \
     --log-progress \
     "${resume_args[@]}"

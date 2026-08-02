@@ -104,6 +104,7 @@ class ExperimentConfig:
     evaluation_batch_size: int = 256
     evaluation_interval: int = 250
     log_interval: int = 1
+    wandb_log_interval: int = 1
     vocab_size: int = 8_192
     query_power_a: float = 0.01
     random_non_queries: bool = False
@@ -207,6 +208,7 @@ class ExperimentConfig:
             self.evaluation_batch_size,
             self.evaluation_interval,
             self.log_interval,
+            self.wandb_log_interval,
             self.hidden_size,
         )
         if any(value < 1 for value in counts):
@@ -458,6 +460,8 @@ _RESUME_IGNORED_FIELDS = {
     "bootstrap_metrics_path",
     "resume_checkpoint",
     "checkpoint_interval",
+    "log_interval",
+    "wandb_log_interval",
     "log_progress",
 }
 _LEGACY_CONFIG_DEFAULTS = {
@@ -1424,12 +1428,17 @@ def run_experiment(
         update_seconds = time.perf_counter() - start
         method_seconds += update_seconds
 
-        should_log_update = (
-            generation == 1
+        should_record_update = (
+            generation == start_generation + 1
             or generation % config.log_interval == 0
             or generation == config.generations
         )
-        if should_log_update and _is_primary():
+        should_log_wandb = (
+            generation == start_generation + 1
+            or generation % config.wandb_log_interval == 0
+            or generation == config.generations
+        )
+        if (should_record_update or should_log_wandb) and _is_primary():
             update_entry = {
                 "generation": generation,
                 "sampled_stage": sampled_stage,
@@ -1456,10 +1465,11 @@ def run_experiment(
             }
             if config.method == "eggroll":
                 update_entry["sigma"] = current_sigma
-            update_history.append(update_entry)
-            if wandb_run is not None:
+            if should_record_update:
+                update_history.append(update_entry)
+            if should_log_wandb and wandb_run is not None:
                 wandb_run.log(_update_wandb_metrics(update_entry))
-            if config.log_progress:
+            if should_record_update and config.log_progress:
                 print(json.dumps({"update": update_entry}), flush=True)
 
         current_sigma *= config.sigma_decay
@@ -1661,6 +1671,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-examples", type=int)
     parser.add_argument("--evaluation-interval", type=int)
     parser.add_argument("--log-interval", type=int)
+    parser.add_argument("--wandb-log-interval", type=int)
     parser.add_argument("--sigma", type=float)
     parser.add_argument("--sigma-decay", type=float)
     parser.add_argument(
@@ -1736,6 +1747,7 @@ def _apply_cli_overrides(
         "test_examples",
         "evaluation_interval",
         "log_interval",
+        "wandb_log_interval",
         "sigma",
         "sigma_decay",
         "mutation_scale_learning_rate",

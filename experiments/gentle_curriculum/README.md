@@ -105,7 +105,8 @@ decisions, and conclusions will be added after the bounded runs complete.
 | Untied treatment | 7 | Gentle | 13,200 | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Intentionally stopped for tied ablation |
 | Tied follow-up | 7 | Gentle, tied input/output | 20,000 | [`okos5dn0`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/okos5dn0) | Complete; reached raw length 32 |
 | Adaptive-scale follow-up | 7 | Gentle, tied input/output, learned block scales | 3,180 | [`0fjtgz6y`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/0fjtgz6y) | Intentionally stopped after scale runaway |
-| Long tied continuation | 7 | Gentle, tied input/output | 2,000,000 ceiling | [`tied2m07`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tied2m07) | Active; bootstrapped at generation 20,000 |
+| Long tied continuation, initial logging | 7 | Gentle, tied input/output | 1,600 continuation generations | [`tied2m07`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tied2m07) | Superseded to log every update |
+| Long tied continuation | 7 | Gentle, tied input/output | 2,000,000 ceiling | [`tied2m7b`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tied2m7b) | Active; bootstrapped at generation 20,000 |
 
 The scheduled-LR reference used the same seed, model, Cartesian population,
 batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
@@ -151,7 +152,9 @@ atomic full-state checkpoints every 20,000 generations preserve exact model,
 optimizer, curriculum, mutation-scale, and RNG continuity. Relaunching
 `scripts/run_tied_long_continuation.sh` automatically selects the newest such
 checkpoint. The 2,000,000-generation value is a manual-stop ceiling, not a
-claim that all of that compute is required.
+claim that all of that compute is required. Training metrics are sent to W&B
+after every update; the local in-memory and JSON update history remains sampled
+every 100 generations so it stays bounded.
 
 ## Interim matched diagnostics
 
