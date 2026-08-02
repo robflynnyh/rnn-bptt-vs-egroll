@@ -104,7 +104,7 @@ decisions, and conclusions will be added after the bounded runs complete.
 | Exact duplicate reference | 7 | Reference | 4,290 | [`59vrqlqz`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/59vrqlqz) | Intentionally stopped as redundant |
 | Untied treatment | 7 | Gentle | 13,200 | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Intentionally stopped for tied ablation |
 | Tied follow-up | 7 | Gentle, tied input/output | 20,000 target | [`okos5dn0`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/okos5dn0) | Running |
-| Adaptive-scale follow-up | 7 | Gentle, tied input/output, learned block scales | 20,000 target | [`0fjtgz6y`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/0fjtgz6y) | Running |
+| Adaptive-scale follow-up | 7 | Gentle, tied input/output, learned block scales | 3,180 | [`0fjtgz6y`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/0fjtgz6y) | Intentionally stopped after scale runaway |
 
 The scheduled-LR reference used the same seed, model, Cartesian population,
 batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
@@ -184,3 +184,23 @@ control. Such a control would reduce the dominant token tables fourfold and
 better isolate recurrent-memory optimization, at the cost of no longer
 matching Zoology's vocabulary scale. It is a follow-up, not part of this fixed
 protocol.
+
+## Adaptive-scale ablation
+
+The adaptive run was stopped at generation 3,180 rather than spending the full
+budget on a clearly unhealthy search distribution. Its shared input/output
+table radius had risen to 9.303 times the base `sigma`, close to the declared
+10-times cap, while the recurrent and hidden-bias radii fell to 0.715 and
+0.718. The output-bias radius remained 1.005. At the matched generation 3,180,
+fixed and adaptive runs both had 6.25% batch accuracy, but fixed-scale training
+loss was 6.193 versus 7.866 adaptive. Their nearby fixed-probe accuracies were
+also similar rather than improved by adaptation.
+
+The separable NES objective rewards mutation radii that produce better sampled
+offspring. Here it consistently favored a much wider shared-table search. The
+mean-gradient estimator must divide out that relative radius to keep mutation
+scale separate from the commit learning rate, so this expansion weakened the
+shared table's committed update and slowed optimization. This negative result
+does not show that every adaptive-radius method will fail, but this estimator
+and learning rate did not improve the working fixed-scale setup. No post-hoc
+retuning run was launched.
