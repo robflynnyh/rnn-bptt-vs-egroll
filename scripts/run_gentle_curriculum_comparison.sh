@@ -7,6 +7,7 @@ gpu_pool="${GPU_POOL:-all}"
 seed="${SEED:-7}"
 schedules="${SCHEDULES:-reference gentle}"
 tie_input_output="${TIE_INPUT_OUTPUT:-0}"
+python_bin="${PYTHON_BIN:-$(command -v python || true)}"
 
 if [[ "$seed" != 7 && "$seed" != 8 ]]; then
     echo "SEED must be 7 or the predeclared confirmation seed 8" >&2
@@ -16,11 +17,16 @@ if [[ "$tie_input_output" != 0 && "$tie_input_output" != 1 ]]; then
     echo "TIE_INPUT_OUTPUT must be 0 or 1" >&2
     exit 2
 fi
+if [[ -z "$python_bin" || ! -x "$python_bin" ]]; then
+    echo "Set PYTHON_BIN to an executable Python interpreter" >&2
+    exit 2
+fi
 
 if [[ "${GENTLE_CURRICULUM_ON_GPU:-0}" != 1 ]]; then
     exec "$with_gpu" "$gpu_pool" --num 1 -- env \
         GENTLE_CURRICULUM_ON_GPU=1 SEED="$seed" \
-        TIE_INPUT_OUTPUT="$tie_input_output" bash "$0" "$@"
+        TIE_INPUT_OUTPUT="$tie_input_output" PYTHON_BIN="$python_bin" \
+        bash "$0" "$@"
 fi
 
 cd "$repo_root"
@@ -47,7 +53,7 @@ run_schedule() {
     fi
     rm -rf "$output_dir"
 
-    python -u -m rnn_bptt_vs_eggroll.experiment \
+    "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
         --method eggroll \
         --preset reference \
         --curriculum-schedule "$schedule" \
