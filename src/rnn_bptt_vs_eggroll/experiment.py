@@ -20,6 +20,7 @@ from torch import Tensor
 from .eggroll import (
     assign_maximization_gradients,
     estimate_elite_centroid_directions,
+    estimate_log_scale_gradients,
     estimate_reward_gradients,
     evaluate_population,
     gradient_rms,
@@ -116,6 +117,10 @@ class ExperimentConfig:
     perturbation_rank: int = 1
     sigma: float = 0.005
     sigma_decay: float = 1.0
+    adaptive_mutation_scales: bool = False
+    mutation_scale_learning_rate: float = 0.5
+    mutation_scale_min: float = 0.1
+    mutation_scale_max: float = 10.0
     fitness_shaping: str = "zscore"
     eggroll_update_rule: str = "standardized"
     elite_count: int = 8
@@ -221,6 +226,12 @@ class ExperimentConfig:
             raise ValueError("perturbation_rank must be positive")
         if self.sigma <= 0 or not 0 < self.sigma_decay <= 1:
             raise ValueError("sigma settings are invalid")
+        if self.mutation_scale_learning_rate <= 0:
+            raise ValueError("mutation scale learning rate must be positive")
+        if not 0 < self.mutation_scale_min <= 1 <= self.mutation_scale_max:
+            raise ValueError("mutation scale bounds must contain 1")
+        if self.adaptive_mutation_scales and self.eggroll_update_rule != "standardized":
+            raise ValueError("adaptive mutation scales require standardized EGGROLL")
         if self.fitness_shaping not in {
             "zscore", "centered-rank", "centered", "antithetic-sign",
         }:
@@ -643,9 +654,18 @@ def _eggroll_update(
     population_data_mode: str,
     population_precision: str,
     noise_generator: torch.Generator,
+    mutation_scales: dict[str, float],
+    adaptive_mutation_scales: bool,
+    mutation_scale_learning_rate: float,
+    mutation_scale_min: float,
+    mutation_scale_max: float,
 ) -> dict[str, float]:
     noise = sample_antithetic_noise(
-        model, local_population_size, perturbation_rank, generator=noise_generator,
+        model,
+        local_population_size,
+        perturbation_rank,
+        generator=noise_generator,
+        parameter_scales=mutation_scales,
     )
     model.eval()
     with torch.no_grad():
@@ -666,6 +686,7 @@ def _eggroll_update(
         )
         global_fitness = shape_fitness(global_losses, fitness_shaping)
         selected_elites = None
+        log_scale_gradients: dict[str, Tensor] = {}
         if update_rule == "elite-centroid":
             if _world_size() != 1:
                 raise ValueError("elite-centroid currently requires one worker")
@@ -682,6 +703,11 @@ def _eggroll_update(
             ]
             raw_reward_gradients = estimate_reward_gradients(noise, local_fitness)
             _average_gradients(raw_reward_gradients)
+            if adaptive_mutation_scales:
+                log_scale_gradients = estimate_log_scale_gradients(
+                    noise, local_fitness,
+                )
+                _average_gradients(log_scale_gradients)
             # This is the update scaling used by the working spiral implementation.
             gradient_scale = sigma * math.sqrt(global_population_size)
         reward_gradients = {
@@ -704,6 +730,14 @@ def _eggroll_update(
     optimizer.zero_grad(set_to_none=True)
     assign_maximization_gradients(model, reward_gradients)
     optimizer.step()
+    if adaptive_mutation_scales:
+        lower = math.log(mutation_scale_min)
+        upper = math.log(mutation_scale_max)
+        for name, gradient in log_scale_gradients.items():
+            updated = math.log(mutation_scales[name]) + (
+                mutation_scale_learning_rate * float(gradient)
+            )
+            mutation_scales[name] = math.exp(min(max(updated, lower), upper))
     parameter_update_rms = _parameter_update_rms(model, parameters_before)
     selected_elite_count = 0 if selected_elites is None else selected_elites.numel()
     elite_positive_fraction = (
@@ -711,7 +745,7 @@ def _eggroll_update(
         if selected_elites is None
         else float(selected_elites.lt(noise.pair_count).float().mean())
     )
-    return {
+    metrics = {
         "mean_model_batch_loss": mean_loss_before,
         "mean_model_batch_accuracy": mean_accuracy_before,
         "candidate_loss_mean": float(global_losses.mean()),
@@ -748,6 +782,13 @@ def _eggroll_update(
             else global_population_size * inputs.shape[0]
         ),
     }
+    metrics["adaptive_mutation_scales"] = float(adaptive_mutation_scales)
+    for name, scale in mutation_scales.items():
+        metrics[f"mutation_scale/{name}"] = scale
+        metrics[f"mutation_scale_gradient/{name}"] = float(
+            log_scale_gradients.get(name, torch.tensor(0.0))
+        )
+    return metrics
 
 
 def scheduled_eggroll_learning_rate(
@@ -902,6 +943,7 @@ def run_experiment(
     ).to(device)
     _broadcast_model(model)
     initial_checksum = _state_checksum(model)
+    mutation_scales = {name: 1.0 for name, _ in model.named_parameters()}
 
     if config.method == "bptt":
         optimizer: torch.optim.Optimizer = torch.optim.AdamW(
@@ -1056,6 +1098,11 @@ def run_experiment(
                 population_data_mode=config.population_data_mode,
                 population_precision=config.population_precision,
                 noise_generator=noise_generator,
+                mutation_scales=mutation_scales,
+                adaptive_mutation_scales=config.adaptive_mutation_scales,
+                mutation_scale_learning_rate=config.mutation_scale_learning_rate,
+                mutation_scale_min=config.mutation_scale_min,
+                mutation_scale_max=config.mutation_scale_max,
             )
         else:
             method_metrics = _bptt_update(
@@ -1218,6 +1265,7 @@ def run_experiment(
             "grid": final_curriculum_probe_grid,
         },
         "final_parameter_l2_norm": _parameter_l2_norm(model),
+        "final_mutation_scales": mutation_scales,
     }
     (output_dir / "metrics.json").write_text(
         json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8",
@@ -1281,6 +1329,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--sigma", type=float)
     parser.add_argument("--sigma-decay", type=float)
+    parser.add_argument(
+        "--adaptive-mutation-scales",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--mutation-scale-learning-rate", type=float)
+    parser.add_argument("--mutation-scale-min", type=float)
+    parser.add_argument("--mutation-scale-max", type=float)
     parser.add_argument("--perturbation-rank", type=int)
     parser.add_argument(
         "--fitness-shaping",
@@ -1342,6 +1398,9 @@ def _apply_cli_overrides(
         "log_interval",
         "sigma",
         "sigma_decay",
+        "mutation_scale_learning_rate",
+        "mutation_scale_min",
+        "mutation_scale_max",
         "perturbation_rank",
         "fitness_shaping",
         "eggroll_update_rule",
@@ -1381,6 +1440,8 @@ def _apply_cli_overrides(
         overrides["final_full_curriculum_probe"] = args.final_full_curriculum_probe
     if args.random_non_queries is not None:
         overrides["random_non_queries"] = args.random_non_queries
+    if args.adaptive_mutation_scales is not None:
+        overrides["adaptive_mutation_scales"] = args.adaptive_mutation_scales
     if args.wandb is not None:
         overrides["wandb_enabled"] = args.wandb
     overrides["log_progress"] = args.log_progress

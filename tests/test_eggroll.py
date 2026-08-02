@@ -7,6 +7,8 @@ from rnn_bptt_vs_eggroll.eggroll import (
     MatrixFactors,
     assign_maximization_gradients,
     estimate_elite_centroid_directions,
+    estimate_log_scale_gradients,
+    estimate_reward_gradients,
     evaluate_population,
     materialize_candidate_parameters,
     population_forward,
@@ -23,8 +25,16 @@ def test_population_forward_matches_materialized_candidates(
     torch.manual_seed(10)
     model = VanillaRNN(11, 4, tie_input_output=tie_input_output)
     inputs = torch.randint(11, (2, 6))
+    scales = {
+        name: 0.5 + 0.25 * index
+        for index, (name, _) in enumerate(model.named_parameters())
+    }
     noise = sample_antithetic_noise(
-        model, population_size=6, rank=2, generator=torch.Generator().manual_seed(11),
+        model,
+        population_size=6,
+        rank=2,
+        generator=torch.Generator().manual_seed(11),
+        parameter_scales=scales,
     )
     sigma = 0.03
 
@@ -132,6 +142,42 @@ def test_zscore_fitness_is_zero_mean_and_unit_variance() -> None:
     fitness = shape_fitness(torch.tensor([3.0, 1.0, 2.0, 9.0]), "zscore")
     assert abs(float(fitness.mean())) < 1e-6
     assert torch.allclose(fitness.var(unbiased=False), torch.tensor(1.0))
+
+
+def test_log_scale_gradient_rewards_useful_high_energy_blocks() -> None:
+    noise = AntitheticNoise(
+        matrices={},
+        vectors={
+            "useful": torch.tensor([[2.0**0.5, 2.0**0.5], [0.0, 0.0]]),
+            "neutral": torch.ones(2, 2),
+        },
+        rank=1,
+        parameter_scales={"useful": 1.0, "neutral": 1.0},
+    )
+    fitness = torch.tensor([1.0, -1.0, 1.0, -1.0])
+
+    gradients = estimate_log_scale_gradients(noise, fitness)
+
+    assert float(gradients["useful"]) == pytest.approx(0.5)
+    assert float(gradients["neutral"]) == pytest.approx(0.0)
+
+
+def test_reward_gradient_corrects_for_relative_mutation_scale() -> None:
+    base_noise = AntitheticNoise(
+        matrices={}, vectors={"bias": torch.tensor([[2.0]])}, rank=1,
+    )
+    scaled_noise = AntitheticNoise(
+        matrices={},
+        vectors=base_noise.vectors,
+        rank=1,
+        parameter_scales={"bias": 4.0},
+    )
+    fitness = torch.tensor([1.0, -1.0])
+
+    base = estimate_reward_gradients(base_noise, fitness)["bias"]
+    scaled = estimate_reward_gradients(scaled_noise, fitness)["bias"]
+
+    assert torch.equal(scaled, base / 4)
 
 
 def test_antithetic_sign_fitness_keeps_only_pairwise_winner() -> None:

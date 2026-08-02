@@ -7,6 +7,7 @@ gpu_pool="${GPU_POOL:-all}"
 seed="${SEED:-7}"
 schedules="${SCHEDULES:-reference gentle}"
 tie_input_output="${TIE_INPUT_OUTPUT:-0}"
+adaptive_mutation_scales="${ADAPTIVE_MUTATION_SCALES:-0}"
 python_bin="${PYTHON_BIN:-$(command -v python || true)}"
 
 if [[ "$seed" != 7 && "$seed" != 8 ]]; then
@@ -17,6 +18,10 @@ if [[ "$tie_input_output" != 0 && "$tie_input_output" != 1 ]]; then
     echo "TIE_INPUT_OUTPUT must be 0 or 1" >&2
     exit 2
 fi
+if [[ "$adaptive_mutation_scales" != 0 && "$adaptive_mutation_scales" != 1 ]]; then
+    echo "ADAPTIVE_MUTATION_SCALES must be 0 or 1" >&2
+    exit 2
+fi
 if [[ -z "$python_bin" || ! -x "$python_bin" ]]; then
     echo "Set PYTHON_BIN to an executable Python interpreter" >&2
     exit 2
@@ -25,7 +30,9 @@ fi
 if [[ "${GENTLE_CURRICULUM_ON_GPU:-0}" != 1 ]]; then
     exec "$with_gpu" "$gpu_pool" --num 1 -- env \
         GENTLE_CURRICULUM_ON_GPU=1 SEED="$seed" \
-        TIE_INPUT_OUTPUT="$tie_input_output" PYTHON_BIN="$python_bin" \
+        TIE_INPUT_OUTPUT="$tie_input_output" \
+        ADAPTIVE_MUTATION_SCALES="$adaptive_mutation_scales" \
+        PYTHON_BIN="$python_bin" \
         bash "$0" "$@"
 fi
 
@@ -40,9 +47,19 @@ run_schedule() {
     local schedule=$1
     local variant="$schedule"
     local tied_args=()
+    local adaptive_args=()
     if [[ "$tie_input_output" == 1 ]]; then
         variant="${schedule}-tied"
         tied_args+=(--tie-input-output)
+    fi
+    if [[ "$adaptive_mutation_scales" == 1 ]]; then
+        variant="${variant}-adaptive-scales"
+        adaptive_args+=(
+            --adaptive-mutation-scales
+            --mutation-scale-learning-rate 0.5
+            --mutation-scale-min 0.1
+            --mutation-scale-max 10
+        )
     fi
     local name="gentle-curriculum-${variant}-seed${seed}-20k"
     local output_dir="$output_root/$variant"
@@ -69,6 +86,7 @@ run_schedule() {
         --population-precision bfloat16 \
         --perturbation-rank 1 \
         --sigma 0.005 \
+        "${adaptive_args[@]}" \
         --fitness-shaping zscore \
         --eggroll-update-rule standardized \
         --eggroll-learning-rate 0.3 \
@@ -103,6 +121,7 @@ for schedule in $schedules; do
     esac
 done
 
-if [[ -f "$output_root/reference/metrics.json" && -f "$output_root/gentle/metrics.json" ]]; then
-    python scripts/summarize_gentle_curriculum.py --seed "$seed"
+if [[ -f "$output_root/reference/metrics.json" \
+    && -f "$output_root/gentle/metrics.json" ]]; then
+    "$python_bin" scripts/summarize_gentle_curriculum.py --seed "$seed"
 fi

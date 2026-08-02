@@ -23,6 +23,7 @@ class AntitheticNoise:
     matrices: dict[str, MatrixFactors]
     vectors: dict[str, Tensor]
     rank: int
+    parameter_scales: dict[str, float] | None = None
 
     @property
     def pair_count(self) -> int:
@@ -38,9 +39,17 @@ class AntitheticNoise:
     def population_size(self) -> int:
         return 2 * self.pair_count
 
+    def scale(self, name: str) -> float:
+        return 1.0 if self.parameter_scales is None else self.parameter_scales[name]
+
 
 def sample_antithetic_noise(
-    model: nn.Module, population_size: int, rank: int, *, generator: torch.Generator,
+    model: nn.Module,
+    population_size: int,
+    rank: int,
+    *,
+    generator: torch.Generator,
+    parameter_scales: dict[str, float] | None = None,
 ) -> AntitheticNoise:
     """Sample rank-r matrix noise and full vector noise in +/- pairs."""
 
@@ -48,10 +57,19 @@ def sample_antithetic_noise(
         raise ValueError("population_size must be a positive even number")
     if rank < 1:
         raise ValueError("rank must be positive")
+    parameters = dict(model.named_parameters())
+    if parameter_scales is not None:
+        if set(parameter_scales) != set(parameters):
+            raise ValueError("parameter scales must match model parameters")
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in parameter_scales.values()
+        ):
+            raise ValueError("parameter scales must be positive and finite")
     pair_count = population_size // 2
     matrices: dict[str, MatrixFactors] = {}
     vectors: dict[str, Tensor] = {}
-    for name, parameter in model.named_parameters():
+    for name, parameter in parameters.items():
         if parameter.ndim == 2:
             matrices[name] = MatrixFactors(
                 left=torch.randn(
@@ -79,7 +97,14 @@ def sample_antithetic_noise(
                 dtype=parameter.dtype,
                 generator=generator,
             )
-    return AntitheticNoise(matrices=matrices, vectors=vectors, rank=rank)
+    return AntitheticNoise(
+        matrices=matrices,
+        vectors=vectors,
+        rank=rank,
+        parameter_scales=(
+            None if parameter_scales is None else dict(parameter_scales)
+        ),
+    )
 
 
 def _signed_pair(values: Tensor) -> Tensor:
@@ -117,7 +142,7 @@ def _population_affine(
         projected = torch.einsum("pbi,pir->pbr", inputs, right)
     else:
         raise ValueError("population affine input must be [B, D] or [P, B, D]")
-    scale = sigma / math.sqrt(noise.rank)
+    scale = sigma * noise.scale(weight_name) / math.sqrt(noise.rank)
     for rank_index in range(noise.rank):
         outputs.addcmul_(
             projected[:, :, rank_index, None],
@@ -127,7 +152,10 @@ def _population_affine(
     if bias is not None:
         if bias_name is None:
             raise ValueError("bias_name is required when a bias is provided")
-        outputs.add_(_signed_pair(noise.vectors[bias_name])[:, None], alpha=sigma)
+        outputs.add_(
+            _signed_pair(noise.vectors[bias_name])[:, None],
+            alpha=sigma * noise.scale(bias_name),
+        )
     return outputs
 
 
@@ -187,7 +215,7 @@ def _population_embedding(
     else:
         selected_right = right[:, token_ids, :]
         outputs = base.unsqueeze(0).expand(noise.population_size, -1, -1).clone()
-    scale = sigma / math.sqrt(noise.rank)
+    scale = sigma * noise.scale(weight_name) / math.sqrt(noise.rank)
     for rank_index in range(noise.rank):
         if candidate_inputs:
             outputs.addcmul_(
@@ -266,6 +294,7 @@ def slice_pair_noise(noise: AntitheticNoise, start: int, end: int) -> Antithetic
         },
         vectors={name: values[start:end] for name, values in noise.vectors.items()},
         rank=noise.rank,
+        parameter_scales=noise.parameter_scales,
     )
 
 
@@ -279,6 +308,7 @@ def _cast_noise(noise: AntitheticNoise, dtype: torch.dtype) -> AntitheticNoise:
         },
         vectors={name: values.to(dtype) for name, values in noise.vectors.items()},
         rank=noise.rank,
+        parameter_scales=noise.parameter_scales,
     )
 
 
@@ -549,12 +579,39 @@ def estimate_reward_gradients(
             pair_fitness.to(factors.left.dtype),
             factors.left,
             factors.right,
-        ) / (denominator * math.sqrt(noise.rank))
+        ) / (
+            denominator * math.sqrt(noise.rank) * noise.scale(name)
+        )
     for name, values in noise.vectors.items():
         broadcast_shape = (noise.pair_count,) + (1,) * (values.ndim - 1)
         gradients[name] = (
             pair_fitness.to(values.dtype).reshape(broadcast_shape) * values
-        ).sum(dim=0) / denominator
+        ).sum(dim=0) / (denominator * noise.scale(name))
+    return gradients
+
+
+def estimate_log_scale_gradients(
+    noise: AntitheticNoise, fitness: Tensor,
+) -> dict[str, Tensor]:
+    """Estimate separable NES natural gradients for blockwise log scales."""
+
+    if fitness.shape != (noise.population_size,):
+        raise ValueError("fitness must have one value per population member")
+    pair_fitness = (
+        fitness[: noise.pair_count] + fitness[noise.pair_count :]
+    ) / 2
+    gradients: dict[str, Tensor] = {}
+    for name, factors in noise.matrices.items():
+        left = factors.left.float()
+        right = factors.right.float()
+        left_gram = torch.einsum("por,pos->prs", left, left)
+        right_gram = torch.einsum("pir,pis->prs", right, right)
+        energy = torch.einsum("prs,prs->p", left_gram, right_gram)
+        energy /= noise.rank * left.shape[1] * right.shape[1]
+        gradients[name] = 0.5 * (pair_fitness * (energy - 1)).mean()
+    for name, values in noise.vectors.items():
+        energy = values.float().flatten(1).square().mean(dim=1)
+        gradients[name] = 0.5 * (pair_fitness * (energy - 1)).mean()
     return gradients
 
 
@@ -638,5 +695,7 @@ def materialize_candidate_parameters(
             delta = delta / math.sqrt(noise.rank)
         else:
             delta = noise.vectors[name][pair]
-        result[name] = parameter.detach() + sign * sigma * delta
+        result[name] = (
+            parameter.detach() + sign * sigma * noise.scale(name) * delta
+        )
     return result

@@ -198,6 +198,48 @@ def test_elite_experiment_logs_selection_and_actual_update(tmp_path) -> None:
     assert metrics["update_to_parameter_rms_ratio"] > 0
 
 
+def test_adaptive_mutation_scales_are_updated_and_recorded(tmp_path) -> None:
+    config = replace(
+        smoke_config(seed=23),
+        method="eggroll",
+        generations=2,
+        evaluation_interval=2,
+        evaluation_examples=4,
+        test_examples=4,
+        curriculum_probe_examples=4,
+        population_size=8,
+        population_chunk_size=4,
+        adaptive_mutation_scales=True,
+        mutation_scale_learning_rate=2.0,
+    )
+
+    result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
+
+    assert result is not None
+    metrics = result["update_history"][-1]["metrics"]
+    assert metrics["adaptive_mutation_scales"] == 1
+    scales = result["final_mutation_scales"]
+    assert set(scales) == {
+        "input_weight", "recurrent_weight", "hidden_bias", "output_weight",
+        "output_bias",
+    }
+    assert any(scale != pytest.approx(1.0) for scale in scales.values())
+    assert all(
+        f"mutation_scale/{name}" in metrics
+        and f"mutation_scale_gradient/{name}" in metrics
+        for name in scales
+    )
+
+
+def test_adaptive_mutation_scales_reject_elite_update() -> None:
+    with pytest.raises(ValueError, match="require standardized"):
+        replace(
+            smoke_config(),
+            adaptive_mutation_scales=True,
+            eggroll_update_rule="elite-centroid",
+        )
+
+
 def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
     class FakeRun:
         def __init__(self) -> None:

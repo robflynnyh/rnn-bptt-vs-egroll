@@ -70,6 +70,21 @@ table and uses its exact transpose at the output. The tied run has 536,640
 parameters rather than 1,060,928. It is an architecture ablation, not the
 schedule-only treatment specified by the original comparison.
 
+An additional tied follow-up learns separate relative mutation scales for the
+shared token matrix, recurrent matrix, hidden bias, and output bias:
+
+```bash
+SCHEDULES=gentle TIE_INPUT_OUTPUT=1 ADAPTIVE_MUTATION_SCALES=1 \
+  bash scripts/run_gentle_curriculum_comparison.sh
+```
+
+It uses a separable NES natural-gradient estimate from each block's normalized
+perturbation energy and candidate fitness. Log scales start at 1, use learning
+rate 0.5, and are bounded to `[0.1, 10]`. The mean-gradient estimate divides
+out each relative radius, so scale adaptation changes exploration without
+silently changing the EGGROLL commit learning rate. This is a follow-up
+optimization ablation and does not replace the predeclared schedule comparison.
+
 If and only if the strict promotion rule passes, run seed 8 with:
 
 ```bash
@@ -89,6 +104,7 @@ decisions, and conclusions will be added after the bounded runs complete.
 | Exact duplicate reference | 7 | Reference | 4,290 | [`59vrqlqz`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/59vrqlqz) | Intentionally stopped as redundant |
 | Untied treatment | 7 | Gentle | 13,200 | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Intentionally stopped for tied ablation |
 | Tied follow-up | 7 | Gentle, tied input/output | 20,000 target | [`okos5dn0`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/okos5dn0) | Running |
+| Adaptive-scale follow-up | 7 | Gentle, tied input/output, learned block scales | 20,000 target | Pending | Pending |
 
 The scheduled-LR reference used the same seed, model, Cartesian population,
 batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
