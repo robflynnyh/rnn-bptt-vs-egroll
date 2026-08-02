@@ -5,6 +5,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 with_gpu="${WITH_GPU:-/store/store5/software/simple-gpu-schedule/with-gpu}"
 gpu_pool="${GPU_POOL:-all}"
 seed="${SEED:-7}"
+schedules="${SCHEDULES:-reference gentle}"
 
 if [[ "$seed" != 7 && "$seed" != 8 ]]; then
     echo "SEED must be 7 or the predeclared confirmation seed 8" >&2
@@ -73,7 +74,16 @@ run_schedule() {
         --log-progress
 }
 
-run_schedule reference
-run_schedule gentle
+for schedule in $schedules; do
+    case "$schedule" in
+        reference|gentle) run_schedule "$schedule" ;;
+        *)
+            echo "SCHEDULES entries must be 'reference' or 'gentle'" >&2
+            exit 2
+            ;;
+    esac
+done
 
-python scripts/summarize_gentle_curriculum.py --seed "$seed"
+if [[ -f "$output_root/reference/metrics.json" && -f "$output_root/gentle/metrics.json" ]]; then
+    python scripts/summarize_gentle_curriculum.py --seed "$seed"
+fi

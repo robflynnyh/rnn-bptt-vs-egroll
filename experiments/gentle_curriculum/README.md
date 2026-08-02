@@ -55,6 +55,9 @@ Run seed 7 with:
 bash scripts/run_gentle_curriculum_comparison.sh
 ```
 
+To run only one side while preserving the same configuration, set
+`SCHEDULES=reference` or `SCHEDULES=gentle`.
+
 If and only if the strict promotion rule passes, run seed 8 with:
 
 ```bash
@@ -64,3 +67,29 @@ SEED=8 bash scripts/run_gentle_curriculum_comparison.sh
 Substantive runs use W&B group
 `eggroll-mqar-gentle-curriculum-seed<seed>`. Results, links, transition tables,
 decisions, and conclusions will be added after the bounded runs complete.
+
+## Run ledger
+
+| Role | Seed | Schedule | Generations | W&B | Status |
+|---|---:|---|---:|---|---|
+| Existing reference evidence | 7 | Reference | 83,662 | [`gunzsjri`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/gunzsjri) | Completed until manually stopped |
+| Exact duplicate reference | 7 | Reference | 4,290 | [`59vrqlqz`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/59vrqlqz) | Intentionally stopped as redundant |
+| Bounded treatment | 7 | Gentle | 20,000 target | [`is9ms5za`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/is9ms5za) | Running |
+
+The existing reference used the same seed, model, Cartesian population,
+batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
+SGD learning rate, no weight decay, fixed 512-example probe, threshold, and
+reference schedule. It used constant learning rate 0.3 and frontier sampling
+probability 1.0. The latter difference has no effect while stage zero is the
+only reached stage. At generation 20,000 its `(16,1)` probe accuracy was 0%,
+and it never advanced from `(16,1)` over 83,662 generations (38,114.9 seconds,
+final probe accuracy 0.586%). This is stronger negative evidence for the
+reference schedule than spending more compute on the duplicate.
+
+The exact duplicate included the cosine learning-rate schedule and 0.5
+frontier rehearsal specified above. It also remained at `(16,1)` through
+generation 4,290. It was stopped once the prior long reference run was
+identified, before the launcher could start the gentle treatment. The gentle
+run is therefore the only remaining seed-7 compute. This execution decision
+was made to avoid repeating an already established negative control; the
+learning-rate difference is retained as a comparison limitation.
