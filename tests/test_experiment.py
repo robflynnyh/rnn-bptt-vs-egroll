@@ -29,12 +29,28 @@ def test_eggroll_learning_rate_holds_then_cosine_decays() -> None:
         eggroll_learning_rate=0.3,
         eggroll_learning_rate_final=0.01,
         eggroll_learning_rate_decay_start=20,
+        eggroll_learning_rate_decay_end=100,
     )
 
     assert scheduled_eggroll_learning_rate(config, 1) == 0.3
     assert scheduled_eggroll_learning_rate(config, 20) == 0.3
     assert scheduled_eggroll_learning_rate(config, 60) == pytest.approx(0.155)
     assert scheduled_eggroll_learning_rate(config, 100) == pytest.approx(0.01)
+
+
+def test_eggroll_learning_rate_holds_at_floor_after_decay() -> None:
+    config = replace(
+        smoke_config(),
+        generations=200,
+        eggroll_learning_rate=0.3,
+        eggroll_learning_rate_final=0.01,
+        eggroll_learning_rate_decay_start=0,
+        eggroll_learning_rate_decay_end=100,
+    )
+
+    assert scheduled_eggroll_learning_rate(config, 50) == pytest.approx(0.155)
+    assert scheduled_eggroll_learning_rate(config, 100) == pytest.approx(0.01)
+    assert scheduled_eggroll_learning_rate(config, 200) == pytest.approx(0.01)
 
 
 def test_smoke_experiment_writes_reproducible_outputs(tmp_path) -> None:

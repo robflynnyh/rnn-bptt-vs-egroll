@@ -71,6 +71,7 @@ class ExperimentConfig:
     eggroll_learning_rate_decay: float = 1.0
     eggroll_learning_rate_final: float | None = None
     eggroll_learning_rate_decay_start: int = 0
+    eggroll_learning_rate_decay_end: int | None = None
     eggroll_weight_decay: float = 0.0
     eggroll_momentum: float = 0.0
     bptt_learning_rate: float = 3e-3
@@ -175,6 +176,12 @@ class ExperimentConfig:
             if not 0 <= self.eggroll_learning_rate_decay_start < self.generations:
                 raise ValueError(
                     "EGGROLL learning-rate decay start must precede the final generation"
+                )
+            decay_end = self.eggroll_learning_rate_decay_end or self.generations
+            if not self.eggroll_learning_rate_decay_start < decay_end <= self.generations:
+                raise ValueError(
+                    "EGGROLL learning-rate decay end must follow its start and not "
+                    "exceed the final generation"
                 )
         if min(self.eggroll_weight_decay, self.bptt_weight_decay) < 0:
             raise ValueError("weight decay must be non-negative")
@@ -588,9 +595,12 @@ def scheduled_eggroll_learning_rate(
     final = config.eggroll_learning_rate_final
     if final is None or generation <= config.eggroll_learning_rate_decay_start:
         return config.eggroll_learning_rate
+    decay_end = config.eggroll_learning_rate_decay_end or config.generations
+    if generation >= decay_end:
+        return final
     progress = (
         (generation - config.eggroll_learning_rate_decay_start)
-        / (config.generations - config.eggroll_learning_rate_decay_start)
+        / (decay_end - config.eggroll_learning_rate_decay_start)
     )
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return final + (config.eggroll_learning_rate - final) * cosine
@@ -1049,6 +1059,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--eggroll-learning-rate-decay", type=float)
     parser.add_argument("--eggroll-learning-rate-final", type=float)
     parser.add_argument("--eggroll-learning-rate-decay-start", type=int)
+    parser.add_argument("--eggroll-learning-rate-decay-end", type=int)
     parser.add_argument("--eggroll-weight-decay", type=float)
     parser.add_argument("--eggroll-momentum", type=float)
     parser.add_argument("--bptt-learning-rate", type=float)
@@ -1100,6 +1111,7 @@ def _apply_cli_overrides(
         "eggroll_learning_rate_decay",
         "eggroll_learning_rate_final",
         "eggroll_learning_rate_decay_start",
+        "eggroll_learning_rate_decay_end",
         "eggroll_weight_decay",
         "eggroll_momentum",
         "bptt_learning_rate",
