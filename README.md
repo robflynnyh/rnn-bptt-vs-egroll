@@ -71,8 +71,8 @@ Training metrics log independently every generation by default; use
 
 Matching seeds produce byte-identical initial parameters in the same RNN.
 BPTT uses AdamW. EGGROLL uses antithetic low-rank parameter perturbations,
-global fitness shaping, plain SGD without weight decay, and no loss backward
-pass.
+configurable global or pairwise-sign fitness shaping, plain SGD without weight
+decay, and no loss backward pass.
 
 EGGROLL supports two ways to assign training examples to candidates:
 

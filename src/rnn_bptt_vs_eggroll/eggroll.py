@@ -512,7 +512,18 @@ def shape_fitness(losses: Tensor, mode: str = "zscore") -> Tensor:
         return order / (len(rewards) - 1) - 0.5
     if mode == "centered":
         return rewards - rewards.mean()
-    raise ValueError("mode must be 'zscore', 'centered-rank', or 'centered'")
+    if mode == "antithetic-sign":
+        if losses.numel() % 2:
+            raise ValueError("antithetic-sign requires an even population")
+        pair_count = losses.numel() // 2
+        # Candidates are ordered as [+E_1, ..., +E_n, -E_1, ..., -E_n].
+        # Lower loss is better, so a positive vote means moving toward +E.
+        votes = torch.sign(losses[pair_count:] - losses[:pair_count]).float()
+        return torch.cat((votes, -votes))
+    raise ValueError(
+        "mode must be 'zscore', 'centered-rank', 'centered', or "
+        "'antithetic-sign'"
+    )
 
 
 def estimate_reward_gradients(

@@ -156,7 +156,9 @@ class ExperimentConfig:
             raise ValueError("perturbation_rank must be positive")
         if self.sigma <= 0 or not 0 < self.sigma_decay <= 1:
             raise ValueError("sigma settings are invalid")
-        if self.fitness_shaping not in {"zscore", "centered-rank", "centered"}:
+        if self.fitness_shaping not in {
+            "zscore", "centered-rank", "centered", "antithetic-sign",
+        }:
             raise ValueError("unknown fitness shaping")
         rates = (self.eggroll_learning_rate, self.bptt_learning_rate)
         if any(value <= 0 for value in rates):
@@ -1053,7 +1055,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sigma-decay", type=float)
     parser.add_argument("--perturbation-rank", type=int)
     parser.add_argument(
-        "--fitness-shaping", choices=("zscore", "centered-rank", "centered"),
+        "--fitness-shaping",
+        choices=("zscore", "centered-rank", "centered", "antithetic-sign"),
     )
     parser.add_argument("--eggroll-learning-rate", type=float)
     parser.add_argument("--eggroll-learning-rate-decay", type=float)

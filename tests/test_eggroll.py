@@ -121,3 +121,10 @@ def test_zscore_fitness_is_zero_mean_and_unit_variance() -> None:
     fitness = shape_fitness(torch.tensor([3.0, 1.0, 2.0, 9.0]), "zscore")
     assert abs(float(fitness.mean())) < 1e-6
     assert torch.allclose(fitness.var(unbiased=False), torch.tensor(1.0))
+
+
+def test_antithetic_sign_fitness_keeps_only_pairwise_winner() -> None:
+    # First half is +E, second half is -E. Lower loss wins.
+    losses = torch.tensor([1.0, 4.0, 2.0, 3.0, 2.0, 2.0])
+    fitness = shape_fitness(losses, "antithetic-sign")
+    assert torch.equal(fitness, torch.tensor([1.0, -1.0, 0.0, -1.0, 1.0, -0.0]))
