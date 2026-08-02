@@ -8,7 +8,7 @@ export PYTHONPATH=src
 mkdir -p .scratch artifacts/eggroll_zoology
 
 generations="${GENERATIONS:-300000}"
-name="eggroll-zoology-cartesian-p8192-b64-bf16-sign-lr3e-1-to1e-2-by100k-g${generations}-seed7"
+name="eggroll-zoology-cartesian-p8192-b64-bf16-zscore-lr3e-1-to1e-2-by100k-g${generations}-seed7"
 python -u -m rnn_bptt_vs_eggroll.experiment \
     --method eggroll \
     --preset reference \
@@ -23,7 +23,7 @@ python -u -m rnn_bptt_vs_eggroll.experiment \
     --population-precision bfloat16 \
     --perturbation-rank 1 \
     --sigma 0.005 \
-    --fitness-shaping antithetic-sign \
+    --fitness-shaping zscore \
     --eggroll-learning-rate 0.3 \
     --eggroll-learning-rate-final 0.01 \
     --eggroll-learning-rate-decay-start 0 \
