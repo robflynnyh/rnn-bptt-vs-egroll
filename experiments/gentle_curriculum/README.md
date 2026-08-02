@@ -142,3 +142,12 @@ aligned. This hypothesis fits the observed slow loss reduction, but the
 curriculum experiment does not isolate or prove it. Weight tying would be a
 useful follow-up ablation after this bounded protocol, not a change to the
 active run.
+
+The 8,192-token vocabulary is inherited from Zoology to retain a realistic
+language-model readout scale; it is not required by associative recall itself.
+Under this repository's current generator, an even vocabulary just above the
+maximum raw length of 1,024 would suffice, making 2,048 a natural reduced-vocab
+control. Such a control would reduce the dominant token tables fourfold and
+better isolate recurrent-memory optimization, at the cost of no longer
+matching Zoology's vocabulary scale. It is a follow-up, not part of this fixed
+protocol.
