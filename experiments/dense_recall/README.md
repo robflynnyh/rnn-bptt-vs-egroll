@@ -53,3 +53,13 @@ and had declined to 32.62% when stopped. Its generation-20,000 checkpoint is
 retained as negative evidence. The replacement from-two run uses a separate
 output directory and W&B identity so it cannot resume the failed trajectory:
 [`densekv2a`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/densekv2a).
+
+The from-two EGGROLL run was stopped at generation 9,800 after its fixed probe
+peaked at 23.83% and declined to 18.36%. A fixed-`N=2` BPTT control uses the
+same seed, examples, tied 64-unit RNN, vocabulary, batch size, and evaluation
+set. It changes only the optimizer and disables promotion, testing whether the
+plateau comes from EGGROLL or from the task/model combination:
+
+```bash
+bash scripts/run_dense_recall_bptt_n2.sh
+```
