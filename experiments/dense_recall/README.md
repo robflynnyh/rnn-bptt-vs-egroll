@@ -89,3 +89,31 @@ the same gate equations evaluate the antithetic EGGROLL population without
 materializing full candidate matrices. Parity tests compare population logits
 against explicitly materialized candidate weights for tied and untied models,
 including grouped candidate evaluation.
+
+The matched run completed 20,000 updates:
+[`bpttl2a`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/bpttl2a).
+Validation accuracy was 48.24% and final test accuracy was 49.41%. On a separate
+4,096-example diagnostic, 99.95% of predictions were one of the two stored
+values, but changing only the query changed the prediction on just 5.88% of
+examples. Accuracy was 48.43% when querying the first pair and 50.63% when
+querying the second. The LSTM therefore learned the same shortcut more strongly
+than the Elman RNN: retain and emit a value, but mostly ignore which key was
+queried. Adding gated memory alone does not resolve key-conditioned selection
+for this fixed two-pair objective.
+
+Implementation and capacity controls rule out the most direct setup errors:
+
+- The generated input is exactly `[K1,V1,K2,V2,Q]`, with `Q` equal to one of
+  the two keys and its paired value as the sole target.
+- The shared recurrence matches `torch.nn.LSTM` states and logits to numerical
+  precision when loaded with identical parameters.
+- The model reaches 100% on a fixed 64-example batch, confirming that labels,
+  loss, and gradients are connected.
+- Fresh-data controls remain near 50% with vocabulary reduced to 64, with an
+  untied output matrix, and with hidden size increased from 64 to 256.
+
+This is therefore a failure to discover the dynamic binding rule, rather than
+evidence of a malformed task or a broken LSTM implementation. Unlike an
+attention layer, an LSTM has no direct content-addressable lookup from the final
+query to the two earlier key positions; BPTT instead finds the easier local
+solution of retaining a value and ignoring most query changes.

@@ -63,3 +63,29 @@ def test_lstm_matches_selected_logit_interface_and_tied_readout() -> None:
     F.cross_entropy(logits, torch.arange(4) % 17).backward()
     assert all(parameter.grad is not None for parameter in model.parameters())
     assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters())
+
+
+def test_lstm_recurrence_matches_torch_lstm() -> None:
+    torch.manual_seed(19)
+    vocab_size = 31
+    hidden_size = 11
+    model = TokenLSTM(vocab_size, hidden_size, tie_input_output=True)
+    reference = torch.nn.LSTM(hidden_size, hidden_size, batch_first=True)
+    with torch.no_grad():
+        reference.weight_ih_l0.copy_(model.lstm_input_weight)
+        reference.weight_hh_l0.copy_(model.lstm_recurrent_weight)
+        reference.bias_ih_l0.copy_(model.lstm_bias)
+        reference.bias_hh_l0.zero_()
+
+    inputs = torch.randint(vocab_size, (7, 5))
+    logits, states = model(inputs, return_states=True)
+    embeddings = F.embedding(inputs, model.input_weight.transpose(0, 1))
+    reference_states, _ = reference(embeddings)
+    reference_logits = F.linear(
+        reference_states[:, -1],
+        model.input_weight.transpose(0, 1),
+        model.output_bias,
+    )
+
+    assert torch.allclose(states, reference_states, atol=1e-6, rtol=1e-6)
+    assert torch.allclose(logits, reference_logits, atol=1e-6, rtol=1e-6)
