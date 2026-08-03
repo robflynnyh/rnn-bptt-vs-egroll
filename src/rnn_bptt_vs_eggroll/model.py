@@ -392,3 +392,127 @@ class TokenLSTM(nn.Module):
     @property
     def parameter_count(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters())
+
+
+class ProductTokenLSTM(nn.Module):
+    """LSTM with a Cartesian-product token vocabulary and tied component heads."""
+
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        *,
+        num_codebooks: int,
+        codebook_size: int,
+    ) -> None:
+        super().__init__()
+        if vocab_size < 2 or vocab_size % 2:
+            raise ValueError("vocab_size must contain equal key and value namespaces")
+        if min(hidden_size, num_codebooks, codebook_size) < 1:
+            raise ValueError("all product-vocabulary dimensions must be positive")
+        if hidden_size % num_codebooks:
+            raise ValueError("hidden_size must divide evenly across codebooks")
+        namespace_size = vocab_size // 2
+        if codebook_size**num_codebooks != namespace_size:
+            raise ValueError("product codebooks must exactly cover one token namespace")
+
+        self.vocab_size = vocab_size
+        self.namespace_size = namespace_size
+        self.hidden_size = hidden_size
+        self.num_codebooks = num_codebooks
+        self.codebook_size = codebook_size
+        self.component_size = hidden_size // num_codebooks
+        self.tie_input_output = True
+
+        self.codebook_weight = nn.Parameter(
+            torch.empty(num_codebooks, codebook_size, self.component_size)
+        )
+        self.role_weight = nn.Parameter(torch.empty(2, hidden_size))
+        self.lstm_input_weight = nn.Parameter(torch.empty(4 * hidden_size, hidden_size))
+        self.lstm_recurrent_weight = nn.Parameter(
+            torch.empty(4 * hidden_size, hidden_size)
+        )
+        self.lstm_bias = nn.Parameter(torch.empty(4 * hidden_size))
+        self.output_bias = nn.Parameter(torch.zeros(num_codebooks, codebook_size))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.codebook_weight, std=1 / math.sqrt(self.hidden_size))
+        nn.init.normal_(self.role_weight, std=1 / math.sqrt(self.hidden_size))
+        bound = 1 / math.sqrt(self.hidden_size)
+        nn.init.uniform_(self.lstm_input_weight, -bound, bound)
+        nn.init.uniform_(self.lstm_recurrent_weight, -bound, bound)
+        nn.init.uniform_(self.lstm_bias, -bound, bound)
+        nn.init.zeros_(self.output_bias)
+
+    def token_components(self, token_ids: Tensor) -> Tensor:
+        """Convert flat key/value tokens to little-endian product-vocabulary digits."""
+
+        if token_ids.dtype != torch.long:
+            raise ValueError("token IDs must be integer tensors")
+        if token_ids.numel() and (
+            int(token_ids.min()) < 0 or int(token_ids.max()) >= self.vocab_size
+        ):
+            raise ValueError("token ID is outside the configured vocabulary")
+        identifiers = token_ids.remainder(self.namespace_size)
+        place_values = self.codebook_size ** torch.arange(
+            self.num_codebooks, device=token_ids.device, dtype=torch.long,
+        )
+        return identifiers.unsqueeze(-1).div(place_values, rounding_mode="floor").remainder(
+            self.codebook_size
+        )
+
+    def embed_tokens(self, token_ids: Tensor) -> Tensor:
+        components = self.token_components(token_ids)
+        embedded_components = [
+            F.embedding(components[..., index], self.codebook_weight[index])
+            for index in range(self.num_codebooks)
+        ]
+        roles = token_ids.ge(self.namespace_size).long()
+        return torch.cat(embedded_components, dim=-1) + F.embedding(
+            roles, self.role_weight,
+        )
+
+    def forward(
+        self,
+        inputs: Tensor,
+        *,
+        readout_mask: Tensor | None = None,
+        return_states: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
+        if inputs.ndim != 2 or inputs.dtype != torch.long:
+            raise ValueError("inputs must be integer token IDs with shape [batch, time]")
+        if readout_mask is not None and readout_mask.shape != inputs.shape:
+            raise ValueError("readout_mask must have the same shape as inputs")
+
+        embedded = self.embed_tokens(inputs)
+        hidden = embedded.new_zeros(inputs.shape[0], self.hidden_size)
+        cell = torch.zeros_like(hidden)
+        states = []
+        for input_term in embedded.unbind(dim=1):
+            gates = F.linear(input_term, self.lstm_input_weight)
+            gates = gates + F.linear(
+                hidden, self.lstm_recurrent_weight, self.lstm_bias,
+            )
+            input_gate, forget_gate, candidate, output_gate = gates.chunk(4, dim=-1)
+            cell = torch.sigmoid(forget_gate) * cell + (
+                torch.sigmoid(input_gate) * torch.tanh(candidate)
+            )
+            hidden = torch.sigmoid(output_gate) * torch.tanh(cell)
+            states.append(hidden)
+
+        stacked_states = torch.stack(states, dim=1)
+        readout_states = hidden if readout_mask is None else stacked_states[readout_mask]
+        component_states = readout_states.reshape(
+            *readout_states.shape[:-1], self.num_codebooks, self.component_size,
+        )
+        logits = torch.einsum(
+            "...cd,ced->...ce", component_states, self.codebook_weight,
+        ) + self.output_bias
+        if not return_states:
+            return logits
+        return logits, stacked_states
+
+    @property
+    def parameter_count(self) -> int:
+        return sum(parameter.numel() for parameter in self.parameters())

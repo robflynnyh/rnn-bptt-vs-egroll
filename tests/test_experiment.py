@@ -116,6 +116,41 @@ def test_dense_recall_smoke_advances_by_one_pair(tmp_path) -> None:
     )
 
 
+def test_product_vocabulary_dense_recall_uses_exact_component_accuracy(tmp_path) -> None:
+    config = replace(
+        smoke_config(seed=47),
+        method="bptt",
+        task="dense-recall",
+        architecture="lstm",
+        curriculum_schedule="custom",
+        curriculum_sequence_lengths=(4, 6),
+        curriculum_num_kv_pairs=(1, 2),
+        curriculum_accuracy_threshold=0.0,
+        curriculum_frontier_probability=1.0,
+        curriculum_probe_examples=4,
+        evaluation_frontier_only=True,
+        evaluation_interval=1,
+        evaluation_examples=4,
+        test_examples=4,
+        evaluation_batch_size=4,
+        generations=2,
+        vocab_size=32,
+        hidden_size=8,
+        tie_input_output=True,
+        product_vocab_codebooks=2,
+        product_vocab_codebook_size=4,
+    )
+
+    result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
+
+    assert result is not None
+    assert result["model"]["architecture"] == "single_layer_product_vocab_lstm"
+    assert result["model"]["product_vocab_codebooks"] == 2
+    assert "batch_component_accuracy" in result["update_history"][-1]["metrics"]
+    test_row = result["test"]["grid"][0]
+    assert 0 <= test_row["accuracy"] <= test_row["component_accuracy"] <= 1
+
+
 def test_dense_recall_stops_after_stage_update_budget(tmp_path) -> None:
     config = replace(
         smoke_config(seed=43),

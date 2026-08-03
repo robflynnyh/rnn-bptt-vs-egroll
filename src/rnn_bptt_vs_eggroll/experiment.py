@@ -27,7 +27,7 @@ from .eggroll import (
     sample_antithetic_noise,
     shape_fitness,
 )
-from .model import TokenLSTM, VanillaRNN
+from .model import ProductTokenLSTM, TokenLSTM, VanillaRNN
 from .task import IGNORE_INDEX, MQARConfig, sample_batch, sample_dense_recall_batch
 
 
@@ -142,6 +142,8 @@ class ExperimentConfig:
     hidden_size: int = 64
     recurrent_radius: float = 0.9
     tie_input_output: bool = False
+    product_vocab_codebooks: int | None = None
+    product_vocab_codebook_size: int | None = None
     population_size: int = 16_384
     population_chunk_size: int = 1_024
     population_data_mode: str = "cartesian"
@@ -263,6 +265,33 @@ class ExperimentConfig:
             raise ValueError(
                 "coupled vocabulary curriculum requires the dense-recall task"
             )
+        product_vocab_values = (
+            self.product_vocab_codebooks,
+            self.product_vocab_codebook_size,
+        )
+        if (product_vocab_values[0] is None) != (product_vocab_values[1] is None):
+            raise ValueError("product vocabulary settings must be provided together")
+        if self.product_vocab_codebooks is not None:
+            assert self.product_vocab_codebook_size is not None
+            if self.method != "bptt" or self.architecture != "lstm":
+                raise ValueError("product vocabulary currently requires a BPTT LSTM")
+            if self.task != "dense-recall":
+                raise ValueError("product vocabulary currently requires dense recall")
+            if not self.tie_input_output:
+                raise ValueError("product vocabulary requires tied input/output codebooks")
+            if min(
+                self.product_vocab_codebooks, self.product_vocab_codebook_size,
+            ) < 2:
+                raise ValueError("product vocabulary needs at least two codebooks and entries")
+            if self.hidden_size % self.product_vocab_codebooks:
+                raise ValueError("hidden size must divide evenly across product codebooks")
+            represented_ids = (
+                self.product_vocab_codebook_size**self.product_vocab_codebooks
+            )
+            if 2 * represented_ids != self.vocab_size:
+                raise ValueError(
+                    "product codebooks must exactly cover both vocabulary namespaces"
+                )
         if not 0 <= self.curriculum_accuracy_threshold <= 1:
             raise ValueError("curriculum_accuracy_threshold must be in [0, 1]")
         if not 0 <= self.curriculum_frontier_probability <= 1:
@@ -542,6 +571,8 @@ _BOOTSTRAP_MATCH_FIELDS = (
     "hidden_size",
     "recurrent_radius",
     "tie_input_output",
+    "product_vocab_codebooks",
+    "product_vocab_codebook_size",
     "population_size",
     "population_chunk_size",
     "population_data_mode",
@@ -596,6 +627,8 @@ _LEGACY_CONFIG_DEFAULTS = {
     "mutation_scale_min": 0.1,
     "mutation_scale_max": 10.0,
     "dense_recall_coupled_vocab": False,
+    "product_vocab_codebooks": None,
+    "product_vocab_codebook_size": None,
 }
 _BOOTSTRAP_OPTIMIZER_FIELDS = {
     "eggroll_learning_rate",
@@ -856,6 +889,8 @@ def _validation_wandb_metrics(entry: dict[str, Any], method: str,) -> dict[str, 
             f"/kv_pairs_{row['num_kv_pairs']}"
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
+        if "component_accuracy" in row:
+            metrics[f"{prefix}/component_accuracy"] = row["component_accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
         metrics[f"{prefix}/task_size"] = float(row["task_size"])
         if row["logical_query_span"] is not None:
@@ -922,6 +957,8 @@ def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
             f"/kv_pairs_{row['num_kv_pairs']}"
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
+        if "component_accuracy" in row:
+            metrics[f"{prefix}/component_accuracy"] = row["component_accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
         metrics[f"{prefix}/task_size"] = float(row["task_size"])
         if row["logical_query_span"] is not None:
@@ -934,6 +971,8 @@ def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
             f"/kv_pairs_{row['num_kv_pairs']}"
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
+        if "component_accuracy" in row:
+            metrics[f"{prefix}/component_accuracy"] = row["component_accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
         metrics[f"{prefix}/task_size"] = float(row["task_size"])
         if row["logical_query_span"] is not None:
@@ -1051,8 +1090,34 @@ def update_curriculum(
     return transition
 
 
+def _per_query_loss_and_matches(
+    model: VanillaRNN | TokenLSTM | ProductTokenLSTM,
+    logits: Tensor,
+    targets: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    if isinstance(model, ProductTokenLSTM):
+        target_components = model.token_components(targets)
+        if logits.shape != (*target_components.shape, model.codebook_size):
+            raise ValueError("product logits do not match target components")
+        component_losses = F.cross_entropy(
+            logits.flatten(0, -2),
+            target_components.flatten(),
+            reduction="none",
+        ).reshape_as(target_components)
+        component_matches = logits.argmax(dim=-1).eq(target_components)
+        return (
+            component_losses.mean(dim=-1),
+            component_matches.all(dim=-1),
+            component_matches,
+        )
+    if logits.ndim != 2:
+        raise ValueError("flat-vocabulary logits must have shape [queries, vocab]")
+    matches = logits.argmax(dim=-1).eq(targets)
+    return F.cross_entropy(logits, targets, reduction="none"), matches, matches[:, None]
+
+
 def _bptt_update(
-    model: VanillaRNN,
+    model: VanillaRNN | TokenLSTM | ProductTokenLSTM,
     optimizer: torch.optim.Optimizer,
     inputs: Tensor,
     targets: Tensor,
@@ -1065,16 +1130,18 @@ def _bptt_update(
     supervised_targets = targets[readout_mask]
     logits = model(inputs, readout_mask=readout_mask)
     assert isinstance(logits, Tensor)
-    loss = F.cross_entropy(logits, supervised_targets)
+    per_query_loss, exact_matches, component_matches = _per_query_loss_and_matches(
+        model, logits, supervised_targets,
+    )
+    loss = per_query_loss.mean()
     loss.backward()
     unclipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
     clipped_gradient_rms = _model_gradient_rms(model)
     optimizer.step()
     return {
         "batch_loss": float(loss.detach()),
-        "batch_accuracy": float(
-            logits.argmax(dim=-1).eq(supervised_targets).float().mean()
-        ),
+        "batch_accuracy": float(exact_matches.float().mean()),
+        "batch_component_accuracy": float(component_matches.float().mean()),
         "gradient_l2_norm_before_clip": float(unclipped_norm),
         "gradient_rms_after_clip": clipped_gradient_rms,
     }
@@ -1262,7 +1329,7 @@ def _evaluation_seed(
 
 @torch.no_grad()
 def evaluate_grid(
-    models: dict[str, VanillaRNN],
+    models: dict[str, VanillaRNN | TokenLSTM | ProductTokenLSTM],
     task_config: MQARConfig,
     config: ExperimentConfig,
     *,
@@ -1287,7 +1354,10 @@ def evaluate_grid(
         generator = torch.Generator().manual_seed(
             _evaluation_seed(config.seed, split, sequence_length, num_kv_pairs)
         )
-        totals = {name: {"loss": 0.0, "correct": 0} for name in models}
+        totals = {
+            name: {"loss": 0.0, "correct": 0, "component_correct": 0, "components": 0}
+            for name in models
+        }
         seen = 0
         while seen < example_count:
             current_size = min(config.evaluation_batch_size, example_count - seen)
@@ -1305,18 +1375,18 @@ def evaluate_grid(
                 model.eval()
                 logits = model(batch.inputs, readout_mask=readout_mask)
                 assert isinstance(logits, Tensor)
-                totals[name]["loss"] += float(
-                    F.cross_entropy(logits, supervised_targets, reduction="sum")
+                per_query_loss, exact_matches, component_matches = (
+                    _per_query_loss_and_matches(model, logits, supervised_targets)
                 )
-                totals[name]["correct"] += int(
-                    logits.argmax(dim=-1).eq(supervised_targets).sum()
-                )
+                totals[name]["loss"] += float(per_query_loss.sum())
+                totals[name]["correct"] += int(exact_matches.sum())
+                totals[name]["component_correct"] += int(component_matches.sum())
+                totals[name]["components"] += component_matches.numel()
             seen += current_size
         queries_per_example = num_kv_pairs if config.task == "mqar" else 1
         supervised_count = example_count * queries_per_example
         for name in models:
-            rows.append(
-                {
+            row = {
                     "method": name,
                     "stage": stage,
                     "sequence_length": sequence_length,
@@ -1330,7 +1400,11 @@ def evaluate_grid(
                     "loss": totals[name]["loss"] / supervised_count,
                     "accuracy": totals[name]["correct"] / supervised_count,
                 }
-            )
+            if isinstance(models[name], ProductTokenLSTM):
+                row["component_accuracy"] = (
+                    totals[name]["component_correct"] / totals[name]["components"]
+                )
+            rows.append(row)
     return rows
 
 
@@ -1386,7 +1460,15 @@ def run_experiment(
         random_non_queries=config.random_non_queries,
     )
     torch.manual_seed(config.seed)
-    if config.architecture == "lstm":
+    if config.product_vocab_codebooks is not None:
+        assert config.product_vocab_codebook_size is not None
+        model = ProductTokenLSTM(
+            config.vocab_size,
+            config.hidden_size,
+            num_codebooks=config.product_vocab_codebooks,
+            codebook_size=config.product_vocab_codebook_size,
+        ).to(device)
+    elif config.architecture == "lstm":
         model = TokenLSTM(
             config.vocab_size,
             config.hidden_size,
@@ -1873,13 +1955,17 @@ def run_experiment(
         "start": provenance,
         "model": {
             "architecture": (
-                "single_layer_lstm"
+                "single_layer_product_vocab_lstm"
+                if config.product_vocab_codebooks is not None
+                else "single_layer_lstm"
                 if config.architecture == "lstm"
                 else "single_layer_tanh_elman_rnn"
             ),
             "vocab_size": task_config.vocab_size,
             "hidden_size": config.hidden_size,
             "tie_input_output": config.tie_input_output,
+            "product_vocab_codebooks": config.product_vocab_codebooks,
+            "product_vocab_codebook_size": config.product_vocab_codebook_size,
             "parameter_count": model.parameter_count,
             "initial_checksum": initial_checksum,
         },
@@ -2002,6 +2088,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tie-input-output", action=argparse.BooleanOptionalAction, default=None,
     )
+    parser.add_argument("--product-vocab-codebooks", type=int)
+    parser.add_argument("--product-vocab-codebook-size", type=int)
     parser.add_argument(
         "--curriculum", action=argparse.BooleanOptionalAction, default=None,
     )
@@ -2112,6 +2200,8 @@ def _apply_cli_overrides(
         "hidden_size",
         "recurrent_radius",
         "tie_input_output",
+        "product_vocab_codebooks",
+        "product_vocab_codebook_size",
         "curriculum_sequence_lengths",
         "curriculum_num_kv_pairs",
         "curriculum_accuracy_threshold",

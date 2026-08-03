@@ -117,3 +117,29 @@ evidence of a malformed task or a broken LSTM implementation. Unlike an
 attention layer, an LSTM has no direct content-addressable lookup from the final
 query to the two earlier key positions; BPTT instead finds the easier local
 solution of retaining a value and ignoring most query changes.
+
+## Product-vocabulary length curriculum
+
+The product-vocabulary BPTT ablation removes the coupled vocabulary curriculum.
+All 4,096 possible key IDs and all 4,096 possible value IDs are available from
+the first update; only the number of stored pairs and input length increase.
+
+Each underlying ID is represented by four base-8 digits. Four learned 8-entry
+codebooks produce four concatenated 32-dimensional slices, and a learned role
+embedding distinguishes key/query tokens from value tokens. The output uses
+four tied 8-way heads. Loss is mean cross-entropy over the four components,
+while curriculum promotion requires all four predicted components to match,
+so the reported task accuracy is exact 4,096-way ID accuracy. Component
+accuracy is logged separately as a diagnostic.
+
+Launch or resume the independent run with:
+
+```bash
+bash scripts/run_dense_recall_bptt_product_vocab_curriculum.sh
+```
+
+It uses the same one-layer 128-unit LSTM, Adam learning rate `1e-3`, batch 256,
+gradient clipping at 5, 90% promotion threshold, 200,000-update per-stage
+budget, and 2,000,000-update global ceiling as the coupled-vocabulary BPTT run.
+Its output directory and W&B identity are separate, so that paused run remains
+resumable from its generation-600,000 checkpoint.
