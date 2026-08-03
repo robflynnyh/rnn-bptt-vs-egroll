@@ -6,7 +6,26 @@ with_gpu="${WITH_GPU:-/store/store5/software/simple-gpu-schedule/with-gpu}"
 gpu_pool="${GPU_POOL:-all}"
 python_bin="${PYTHON_BIN:-/store/store4/software/bin/anaconda3/envs/flash_attn_pytorch2/bin/python}"
 target_generations="${GENERATIONS:-2000000}"
-output_dir="${OUTPUT_DIR:-$repo_root/artifacts/dense_recall/seed-7/eggroll-tied}"
+curriculum_schedule="${CURRICULUM_SCHEDULE:-dense-recall-from-2}"
+
+case "$curriculum_schedule" in
+    dense-recall)
+        run_slug="eggroll-tied-from-1"
+        wandb_run_id="densekv07"
+        wandb_run_name="dense-single-query-recall-from-1-eggroll-tied-seed7"
+        ;;
+    dense-recall-from-2)
+        run_slug="eggroll-tied-from-2"
+        wandb_run_id="densekv2a"
+        wandb_run_name="dense-single-query-recall-from-2-eggroll-tied-seed7"
+        ;;
+    *)
+        echo "Unsupported CURRICULUM_SCHEDULE: $curriculum_schedule" >&2
+        exit 2
+        ;;
+esac
+
+output_dir="${OUTPUT_DIR:-$repo_root/artifacts/dense_recall/seed-7/$run_slug}"
 
 if [[ ! -x "$python_bin" ]]; then
     echo "Set PYTHON_BIN to an executable Python interpreter" >&2
@@ -22,6 +41,7 @@ if [[ "${DENSE_RECALL_ON_GPU:-0}" != 1 ]]; then
         DENSE_RECALL_ON_GPU=1 \
         PYTHON_BIN="$python_bin" \
         GENERATIONS="$target_generations" \
+        CURRICULUM_SCHEDULE="$curriculum_schedule" \
         OUTPUT_DIR="$output_dir" \
         bash "$0" "$@"
 fi
@@ -46,7 +66,7 @@ fi
 exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --method eggroll \
     --preset reference \
-    --curriculum-schedule dense-recall \
+    --curriculum-schedule "$curriculum_schedule" \
     --device cuda \
     --seed 7 \
     --generations "$target_generations" \
@@ -82,9 +102,9 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --wandb \
     --wandb-project rnn-bptt-vs-eggroll \
     --wandb-entity wobrob101 \
-    --wandb-run-name dense-single-query-recall-eggroll-tied-seed7 \
+    --wandb-run-name "$wandb_run_name" \
     --wandb-group eggroll-dense-single-query-recall \
-    --wandb-run-id densekv07 \
+    --wandb-run-id "$wandb_run_id" \
     --wandb-resume allow \
     --log-progress \
     "${resume_args[@]}" \

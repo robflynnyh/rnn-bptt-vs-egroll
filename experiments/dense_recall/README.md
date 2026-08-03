@@ -23,10 +23,14 @@ single answer prediction contributes to loss and accuracy.
 
 ## Protocol
 
-The curriculum starts at one pair and advances by exactly one pair after one
-fixed 512-example frontier probe exceeds 90% accuracy. It stops at 1,024 pairs
-or 2,000,000 generations, whichever comes first. Training and evaluation cover
-only the current frontier.
+The initial curriculum started at one pair and advanced by exactly one pair
+after one fixed 512-example frontier probe exceeded 90% accuracy. This exposed
+a discontinuity: one pair can be solved by retaining the only value without
+using the query, whereas two pairs require key-conditioned retrieval. The
+replacement schedule therefore starts at two pairs, where the intended
+operation is required from initialization, and then advances by one pair. It
+stops at 1,024 pairs or 2,000,000 generations, whichever comes first. Training
+and evaluation cover only the current frontier.
 
 The initial run uses a tied, single-layer 64-unit tanh RNN; population 8,192;
 batch 64; Cartesian candidate evaluation; BF16 candidate forwards; rank-1
@@ -41,5 +45,10 @@ bash scripts/run_dense_recall_curriculum.sh
 
 W&B training metrics are logged every generation, frontier evaluation every
 100 generations, and atomic resumable checkpoints every 20,000 generations.
-The seed-7 run is tracked as
-[`densekv07`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/densekv07).
+The initial from-one run
+[`densekv07`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/densekv07)
+was stopped after 22,300 generations. It promoted at generation 17,500 with
+90.82% one-pair accuracy, but the two-pair probe immediately fell to 37.11%
+and had declined to 32.62% when stopped. Its generation-20,000 checkpoint is
+retained as negative evidence. The replacement from-two run uses a separate
+output directory and W&B identity so it cannot resume the failed trajectory.

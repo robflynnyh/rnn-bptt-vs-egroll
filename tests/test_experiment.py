@@ -7,6 +7,7 @@ import torch
 
 from rnn_bptt_vs_eggroll.experiment import (
     DENSE_RECALL_CURRICULUM,
+    DENSE_RECALL_FROM_TWO_CURRICULUM,
     GENTLE_CURRICULUM,
     REFERENCE_CURRICULUM,
     CurriculumState,
@@ -55,6 +56,15 @@ def test_named_curriculum_schedules_are_exact() -> None:
     assert len(DENSE_RECALL_CURRICULUM) == 1_024
     assert DENSE_RECALL_CURRICULUM[0] == (4, 1)
     assert DENSE_RECALL_CURRICULUM[-1] == (2_050, 1_024)
+
+    dense_from_two = apply_curriculum_schedule(reference, "dense-recall-from-2")
+    assert dense_from_two.task == "dense-recall"
+    assert tuple(zip(
+        dense_from_two.curriculum_sequence_lengths,
+        dense_from_two.curriculum_num_kv_pairs,
+    )) == DENSE_RECALL_FROM_TWO_CURRICULUM
+    assert DENSE_RECALL_FROM_TWO_CURRICULUM[0] == (6, 2)
+    assert DENSE_RECALL_FROM_TWO_CURRICULUM[-1] == (2_050, 1_024)
 
 
 def test_curriculum_advances_after_one_passing_probe() -> None:

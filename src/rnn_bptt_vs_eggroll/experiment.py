@@ -53,10 +53,12 @@ DENSE_RECALL_CURRICULUM: tuple[tuple[int, int], ...] = tuple(
     (2 * num_kv_pairs + 2, num_kv_pairs)
     for num_kv_pairs in range(1, 1_025)
 )
+DENSE_RECALL_FROM_TWO_CURRICULUM = DENSE_RECALL_CURRICULUM[1:]
 CURRICULUM_SCHEDULES = {
     "reference": REFERENCE_CURRICULUM,
     "gentle": GENTLE_CURRICULUM,
     "dense-recall": DENSE_RECALL_CURRICULUM,
+    "dense-recall-from-2": DENSE_RECALL_FROM_TWO_CURRICULUM,
 }
 
 
@@ -98,7 +100,7 @@ def apply_curriculum_schedule(
         raise ValueError(f"unknown curriculum schedule: {schedule}") from error
     return replace(
         config,
-        task="dense-recall" if schedule == "dense-recall" else "mqar",
+        task="dense-recall" if schedule.startswith("dense-recall") else "mqar",
         curriculum_schedule=schedule,
         curriculum_sequence_lengths=tuple(length for length, _ in tasks),
         curriculum_num_kv_pairs=tuple(pairs for _, pairs in tasks),
@@ -235,13 +237,19 @@ class ExperimentConfig:
             and tasks != CURRICULUM_SCHEDULES[self.curriculum_schedule]
         ):
             raise ValueError("named curriculum schedule does not match its stages")
-        if self.curriculum_schedule == "dense-recall" and self.task != "dense-recall":
+        if (
+            self.curriculum_schedule.startswith("dense-recall")
+            and self.task != "dense-recall"
+        ):
             raise ValueError(
                 "dense-recall task and named schedule must be selected together"
             )
         if (
             self.task == "dense-recall"
-            and self.curriculum_schedule not in {"dense-recall", "custom", "smoke"}
+            and not (
+                self.curriculum_schedule.startswith("dense-recall")
+                or self.curriculum_schedule in {"custom", "smoke"}
+            )
         ):
             raise ValueError(
                 "dense-recall task requires its named schedule or a custom schedule"
