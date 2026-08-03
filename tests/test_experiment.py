@@ -404,11 +404,17 @@ def test_full_state_checkpoint_resume_matches_uninterrupted_training(tmp_path) -
         checkpoint_interval=2,
     )
     uninterrupted_dir = tmp_path / "uninterrupted"
+    interrupted_dir = tmp_path / "interrupted"
     resumed_dir = tmp_path / "resumed"
     uninterrupted = run_experiment(
         uninterrupted_dir, device=torch.device("cpu"), config=config,
     )
-    checkpoint = uninterrupted_dir / "checkpoints" / "generation_0000000002.pt"
+    run_experiment(
+        interrupted_dir,
+        device=torch.device("cpu"),
+        config=replace(config, generations=2),
+    )
+    checkpoint = interrupted_dir / "checkpoints" / "generation_0000000002.pt"
 
     resumed = run_experiment(
         resumed_dir,

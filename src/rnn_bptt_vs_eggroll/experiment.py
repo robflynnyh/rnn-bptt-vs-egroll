@@ -570,6 +570,7 @@ _BOOTSTRAP_MATCH_FIELDS = (
     "bptt_gradient_clip",
 )
 _RESUME_IGNORED_FIELDS = {
+    "generations",
     "wandb_enabled",
     "wandb_project",
     "wandb_entity",
