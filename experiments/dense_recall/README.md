@@ -74,3 +74,18 @@ or second pair (43.48%). BPTT therefore learned to emit a stored value but did
 not reliably use the query to select its binding. The EGGROLL plateau is not
 solely an evolution-optimizer failure: this plain tanh RNN and objective also
 present a strong fixed-position/value-selection shortcut to gradient descent.
+
+The matched LSTM control changes only the recurrent architecture while keeping
+BPTT, seed, hidden size, tied embedding/readout, optimizer, clipping, batches,
+and fixed `N=2` data unchanged:
+
+```bash
+ARCHITECTURE=lstm bash scripts/run_dense_recall_bptt_n2.sh
+```
+
+The LSTM recurrence has one shared functional implementation. With BPTT it
+uses the centre parameters directly; when low-rank corrections are supplied,
+the same gate equations evaluate the antithetic EGGROLL population without
+materializing full candidate matrices. Parity tests compare population logits
+against explicitly materialized candidate weights for tied and untied models,
+including grouped candidate evaluation.

@@ -15,7 +15,12 @@ from rnn_bptt_vs_eggroll.eggroll import (
     sample_antithetic_noise,
     shape_fitness,
 )
-from rnn_bptt_vs_eggroll.model import VanillaRNN, functional_rnn_forward
+from rnn_bptt_vs_eggroll.model import (
+    TokenLSTM,
+    VanillaRNN,
+    functional_lstm_forward,
+    functional_rnn_forward,
+)
 
 
 @pytest.mark.parametrize("tie_input_output", [False, True])
@@ -48,6 +53,32 @@ def test_population_forward_matches_materialized_candidates(
         ]
     )
     assert torch.allclose(population_logits, explicit_logits, atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("tie_input_output", [False, True])
+def test_lstm_population_forward_matches_materialized_candidates(
+    tie_input_output: bool,
+) -> None:
+    torch.manual_seed(12)
+    model = TokenLSTM(11, 4, tie_input_output=tie_input_output)
+    inputs = torch.randint(11, (2, 6))
+    noise = sample_antithetic_noise(
+        model, population_size=6, rank=2,
+        generator=torch.Generator().manual_seed(13),
+    )
+    sigma = 0.03
+
+    population_logits = population_forward(model, inputs, noise, sigma)
+    explicit_logits = torch.stack(
+        [
+            functional_lstm_forward(
+                inputs, materialize_candidate_parameters(model, noise, index, sigma),
+            )
+            for index in range(noise.population_size)
+        ]
+    )
+
+    assert torch.allclose(population_logits, explicit_logits, atol=3e-6, rtol=3e-5)
 
 
 def test_chunked_population_preserves_antithetic_order() -> None:
@@ -124,6 +155,48 @@ def test_grouped_population_matches_materialized_candidates(
         )
 
     assert torch.allclose(losses, torch.stack(expected_losses), atol=2e-6, rtol=2e-5)
+    assert torch.equal(accuracies, torch.stack(expected_accuracies))
+
+
+def test_grouped_lstm_population_matches_materialized_candidates() -> None:
+    torch.manual_seed(24)
+    model = TokenLSTM(7, 3, tie_input_output=True)
+    inputs = torch.randint(7, (2, 6))
+    targets = torch.full((2, 6), -100)
+    targets[:, -1] = torch.tensor([3, 5])
+    noise = sample_antithetic_noise(
+        model, population_size=8, rank=1,
+        generator=torch.Generator().manual_seed(25),
+    )
+    sigma = 0.02
+
+    losses, accuracies = evaluate_population(
+        model,
+        inputs,
+        targets,
+        noise,
+        sigma,
+        candidate_chunk_size=4,
+        data_mode="grouped",
+    )
+    expected_losses = []
+    expected_accuracies = []
+    for candidate in range(noise.population_size):
+        pair = candidate % noise.pair_count
+        example = pair % inputs.shape[0]
+        mask = targets[example : example + 1].ne(-100)
+        selected_target = targets[example : example + 1][mask]
+        logits = functional_lstm_forward(
+            inputs[example : example + 1],
+            materialize_candidate_parameters(model, noise, candidate, sigma),
+            readout_mask=mask,
+        )
+        expected_losses.append(F.cross_entropy(logits, selected_target))
+        expected_accuracies.append(
+            logits.argmax(dim=-1).eq(selected_target).float().mean()
+        )
+
+    assert torch.allclose(losses, torch.stack(expected_losses), atol=3e-6, rtol=3e-5)
     assert torch.equal(accuracies, torch.stack(expected_accuracies))
 
 

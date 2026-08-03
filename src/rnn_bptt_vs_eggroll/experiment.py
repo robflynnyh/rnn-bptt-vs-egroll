@@ -27,7 +27,7 @@ from .eggroll import (
     sample_antithetic_noise,
     shape_fitness,
 )
-from .model import VanillaRNN
+from .model import TokenLSTM, VanillaRNN
 from .task import IGNORE_INDEX, MQARConfig, sample_batch, sample_dense_recall_batch
 
 
@@ -111,6 +111,7 @@ def apply_curriculum_schedule(
 class ExperimentConfig:
     method: str = "bptt"
     task: str = "mqar"
+    architecture: str = "elman"
     seed: int = 7
     generations: int = 3_000
     batch_size: int = 256
@@ -185,6 +186,8 @@ class ExperimentConfig:
             raise ValueError("method must be 'bptt' or 'eggroll'")
         if self.task not in {"mqar", "dense-recall"}:
             raise ValueError("task must be mqar or dense-recall")
+        if self.architecture not in {"elman", "lstm"}:
+            raise ValueError("architecture must be elman or lstm")
         if self.generations < 1 or self.batch_size < 1:
             raise ValueError("generations and batch_size must be positive")
         if not self.curriculum_sequence_lengths:
@@ -497,6 +500,7 @@ def _state_checksum(model: VanillaRNN) -> str:
 _BOOTSTRAP_MATCH_FIELDS = (
     "method",
     "task",
+    "architecture",
     "seed",
     "batch_size",
     "curriculum_enabled",
@@ -561,6 +565,7 @@ _RESUME_IGNORED_FIELDS = {
     "log_progress",
 }
 _LEGACY_CONFIG_DEFAULTS = {
+    "architecture": "elman",
     "adaptive_mutation_scales": False,
     "mutation_scale_learning_rate": 0.5,
     "mutation_scale_min": 0.1,
@@ -1344,10 +1349,19 @@ def run_experiment(
         random_non_queries=config.random_non_queries,
     )
     torch.manual_seed(config.seed)
-    model = VanillaRNN(
-        config.vocab_size, config.hidden_size, recurrent_radius=config.recurrent_radius,
-        tie_input_output=config.tie_input_output,
-    ).to(device)
+    if config.architecture == "lstm":
+        model = TokenLSTM(
+            config.vocab_size,
+            config.hidden_size,
+            tie_input_output=config.tie_input_output,
+        ).to(device)
+    else:
+        model = VanillaRNN(
+            config.vocab_size,
+            config.hidden_size,
+            recurrent_radius=config.recurrent_radius,
+            tie_input_output=config.tie_input_output,
+        ).to(device)
     mutation_scales = {name: 1.0 for name, _ in model.named_parameters()}
 
     if config.method == "bptt":
@@ -1727,7 +1741,11 @@ def run_experiment(
         "config": asdict(config),
         "start": provenance,
         "model": {
-            "architecture": "single_layer_tanh_elman_rnn",
+            "architecture": (
+                "single_layer_lstm"
+                if config.architecture == "lstm"
+                else "single_layer_tanh_elman_rnn"
+            ),
             "vocab_size": task_config.vocab_size,
             "hidden_size": config.hidden_size,
             "tie_input_output": config.tie_input_output,
@@ -1826,6 +1844,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=("bptt", "eggroll"), required=True)
     parser.add_argument("--task", choices=("mqar", "dense-recall"))
+    parser.add_argument("--architecture", choices=("elman", "lstm"))
     parser.add_argument("--preset", choices=("smoke", "reference"), default="smoke")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/smoke"))
     parser.add_argument("--device", default="auto")
@@ -1938,6 +1957,7 @@ def _apply_cli_overrides(
     names = (
         "method",
         "task",
+        "architecture",
         "seed",
         "generations",
         "batch_size",

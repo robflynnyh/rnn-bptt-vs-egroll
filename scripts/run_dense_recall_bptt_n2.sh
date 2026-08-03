@@ -6,7 +6,26 @@ with_gpu="${WITH_GPU:-/store/store5/software/simple-gpu-schedule/with-gpu}"
 gpu_pool="${GPU_POOL:-all}"
 python_bin="${PYTHON_BIN:-/store/store4/software/bin/anaconda3/envs/flash_attn_pytorch2/bin/python}"
 target_generations="${GENERATIONS:-20000}"
-output_dir="${OUTPUT_DIR:-$repo_root/artifacts/dense_recall/seed-7/bptt-tied-n2}"
+architecture="${ARCHITECTURE:-elman}"
+
+case "$architecture" in
+    elman)
+        run_slug="bptt-tied-n2"
+        wandb_run_id="bpttn2a"
+        wandb_run_name="dense-single-query-recall-bptt-tied-n2-seed7"
+        ;;
+    lstm)
+        run_slug="bptt-lstm-tied-n2"
+        wandb_run_id="bpttl2a"
+        wandb_run_name="dense-single-query-recall-bptt-lstm-tied-n2-seed7"
+        ;;
+    *)
+        echo "Unsupported ARCHITECTURE: $architecture" >&2
+        exit 2
+        ;;
+esac
+
+output_dir="${OUTPUT_DIR:-$repo_root/artifacts/dense_recall/seed-7/$run_slug}"
 
 if [[ ! -x "$python_bin" ]]; then
     echo "Set PYTHON_BIN to an executable Python interpreter" >&2
@@ -22,6 +41,7 @@ if [[ "${DENSE_RECALL_BPTT_ON_GPU:-0}" != 1 ]]; then
         DENSE_RECALL_BPTT_ON_GPU=1 \
         PYTHON_BIN="$python_bin" \
         GENERATIONS="$target_generations" \
+        ARCHITECTURE="$architecture" \
         OUTPUT_DIR="$output_dir" \
         bash "$0" "$@"
 fi
@@ -47,6 +67,7 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --method bptt \
     --preset reference \
     --task dense-recall \
+    --architecture "$architecture" \
     --curriculum-sequence-lengths 6 \
     --curriculum-num-kv-pairs 2 \
     --no-curriculum \
@@ -70,9 +91,9 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --wandb \
     --wandb-project rnn-bptt-vs-eggroll \
     --wandb-entity wobrob101 \
-    --wandb-run-name dense-single-query-recall-bptt-tied-n2-seed7 \
+    --wandb-run-name "$wandb_run_name" \
     --wandb-group dense-single-query-recall-n2-optimizer-control \
-    --wandb-run-id bpttn2a \
+    --wandb-run-id "$wandb_run_id" \
     --wandb-resume allow \
     --log-progress \
     "${resume_args[@]}" \

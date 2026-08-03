@@ -132,6 +132,13 @@ def test_eggroll_learning_rate_holds_then_cosine_decays() -> None:
     assert scheduled_eggroll_learning_rate(config, 100) == pytest.approx(0.01)
 
 
+def test_lstm_is_available_for_both_optimizers() -> None:
+    lstm = replace(smoke_config(), method="bptt", architecture="lstm")
+    assert lstm.architecture == "lstm"
+    eggroll = replace(smoke_config(), method="eggroll", architecture="lstm")
+    assert eggroll.architecture == "lstm"
+
+
 def test_eggroll_learning_rate_holds_at_floor_after_decay() -> None:
     config = replace(
         smoke_config(),

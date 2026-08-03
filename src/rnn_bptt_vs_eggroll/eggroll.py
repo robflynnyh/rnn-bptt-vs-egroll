@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .model import VanillaRNN
+from .model import TokenLSTM, VanillaRNN
 
 
 @dataclass(frozen=True)
@@ -234,7 +234,7 @@ def _population_embedding(
 
 @torch.no_grad()
 def population_forward(
-    model: VanillaRNN,
+    model: nn.Module,
     inputs: Tensor,
     noise: AntitheticNoise,
     sigma: float,
@@ -249,6 +249,15 @@ def population_forward(
         raise ValueError("readout_mask must have the same shape as inputs")
     if sigma < 0:
         raise ValueError("sigma must be non-negative")
+    if isinstance(model, TokenLSTM):
+        logits = model(
+            inputs,
+            readout_mask=readout_mask,
+            corrections=noise,
+            sigma=sigma,
+        )
+        assert isinstance(logits, Tensor)
+        return logits
     hidden = model.input_weight.new_zeros(
         noise.population_size, inputs.shape[0], model.hidden_size,
     )
@@ -313,7 +322,7 @@ def _cast_noise(noise: AntitheticNoise, dtype: torch.dtype) -> AntitheticNoise:
 
 
 def _population_readout_sums(
-    model: VanillaRNN,
+    model: nn.Module,
     states: Tensor,
     targets: Tensor,
     noise: AntitheticNoise,
@@ -331,7 +340,7 @@ def _population_readout_sums(
 
 @torch.no_grad()
 def _grouped_population_loss_and_accuracy(
-    model: VanillaRNN,
+    model: nn.Module,
     inputs: Tensor,
     targets: Tensor,
     noise: AntitheticNoise,
@@ -346,6 +355,23 @@ def _grouped_population_loss_and_accuracy(
     if not counts.numel() or int(counts.min()) < 1 or not counts.eq(counts[0]).all():
         raise ValueError("grouped candidates must have equal nonzero target counts")
     query_count = int(counts[0])
+    if isinstance(model, TokenLSTM):
+        logits = model(
+            inputs,
+            readout_mask=readout_mask,
+            corrections=noise,
+            sigma=sigma,
+            candidate_inputs=True,
+        )
+        assert isinstance(logits, Tensor)
+        logits = logits.float()
+        readout_targets = targets[readout_mask].reshape(
+            noise.population_size, query_count,
+        )
+        target_logits = logits.gather(-1, readout_targets[..., None]).squeeze(-1)
+        losses = torch.logsumexp(logits, dim=-1) - target_logits
+        accuracies = logits.argmax(dim=-1).eq(readout_targets)
+        return losses.mean(dim=-1), accuracies.float().mean(dim=-1)
     selected_times = readout_mask.any(dim=0)
     selected_time_flags = selected_times.tolist()
     time_to_slot = selected_times.cumsum(dim=0) - 1
@@ -398,13 +424,35 @@ def _grouped_population_loss_and_accuracy(
 
 @torch.no_grad()
 def _population_loss_and_accuracy(
-    model: VanillaRNN,
+    model: nn.Module,
     inputs: Tensor,
     targets: Tensor,
     noise: AntitheticNoise,
     sigma: float,
 ) -> tuple[Tensor, Tensor]:
     """Accumulate exact query metrics without retaining every readout logit."""
+
+    if isinstance(model, TokenLSTM):
+        readout_mask = targets.ne(-100)
+        logits = population_forward(
+            model, inputs, noise, sigma, readout_mask=readout_mask,
+        ).float()
+        supervised_targets = torch.cat(
+            [
+                targets[:, time][readout_mask[:, time]]
+                for time in range(targets.shape[1])
+                if readout_mask[:, time].any()
+            ]
+        )
+        target_logits = logits.gather(
+            -1,
+            supervised_targets[None, :, None].expand(
+                noise.population_size, -1, 1,
+            ),
+        ).squeeze(-1)
+        losses = torch.logsumexp(logits, dim=-1) - target_logits
+        accuracies = logits.argmax(dim=-1).eq(supervised_targets)
+        return losses.mean(dim=-1), accuracies.float().mean(dim=-1)
 
     hidden = model.input_weight.new_zeros(
         noise.population_size, inputs.shape[0], model.hidden_size,
@@ -464,7 +512,7 @@ def _population_loss_and_accuracy(
 
 @torch.no_grad()
 def evaluate_population(
-    model: VanillaRNN,
+    model: nn.Module,
     inputs: Tensor,
     targets: Tensor,
     noise: AntitheticNoise,

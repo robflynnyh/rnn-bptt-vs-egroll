@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from rnn_bptt_vs_eggroll.model import VanillaRNN
+from rnn_bptt_vs_eggroll.model import TokenLSTM, VanillaRNN
 
 
 def test_model_returns_selected_logits_and_states() -> None:
@@ -43,3 +43,23 @@ def test_tied_model_reuses_input_weight_for_output_and_gradients() -> None:
     F.cross_entropy(logits, torch.arange(4) % 17).backward()
     assert model.input_weight.grad is not None
     assert torch.isfinite(model.input_weight.grad).all()
+
+
+def test_lstm_matches_selected_logit_interface_and_tied_readout() -> None:
+    torch.manual_seed(5)
+    model = TokenLSTM(17, 7, tie_input_output=True)
+    inputs = torch.randint(17, (4, 8))
+    readout_mask = torch.zeros_like(inputs, dtype=torch.bool)
+    readout_mask[:, 6] = True
+
+    logits, states = model(inputs, readout_mask=readout_mask, return_states=True)
+    expected = F.linear(
+        states[:, 6], model.input_weight.transpose(0, 1), model.output_bias,
+    )
+
+    assert logits.shape == (4, 17)
+    assert states.shape == (4, 8, 7)
+    assert torch.equal(logits, expected)
+    F.cross_entropy(logits, torch.arange(4) % 17).backward()
+    assert all(parameter.grad is not None for parameter in model.parameters())
+    assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters())
