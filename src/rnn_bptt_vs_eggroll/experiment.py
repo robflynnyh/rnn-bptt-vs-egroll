@@ -103,6 +103,7 @@ class ExperimentConfig:
     test_examples: int = 4_096
     evaluation_batch_size: int = 256
     evaluation_interval: int = 250
+    evaluation_frontier_only: bool = False
     log_interval: int = 1
     wandb_log_interval: int = 1
     vocab_size: int = 8_192
@@ -147,6 +148,7 @@ class ExperimentConfig:
     bootstrap_model_path: str | None = None
     bootstrap_metrics_path: str | None = None
     bootstrap_allow_optimizer_override: bool = False
+    bootstrap_allow_curriculum_sampling_override: bool = False
     resume_checkpoint: str | None = None
     checkpoint_interval: int | None = None
     log_progress: bool = False
@@ -460,6 +462,7 @@ _RESUME_IGNORED_FIELDS = {
     "bootstrap_model_path",
     "bootstrap_metrics_path",
     "bootstrap_allow_optimizer_override",
+    "bootstrap_allow_curriculum_sampling_override",
     "resume_checkpoint",
     "checkpoint_interval",
     "log_interval",
@@ -484,6 +487,7 @@ _BOOTSTRAP_OPTIMIZER_FIELDS = {
     "bptt_learning_rate_decay",
     "bptt_weight_decay",
 }
+_BOOTSTRAP_CURRICULUM_SAMPLING_FIELDS = {"curriculum_frontier_probability"}
 
 
 def _normalise_config_value(value: Any) -> Any:
@@ -519,6 +523,11 @@ def _load_bootstrap_state(
         if (
             config.bootstrap_allow_optimizer_override
             and name in _BOOTSTRAP_OPTIMIZER_FIELDS
+        ):
+            continue
+        if (
+            config.bootstrap_allow_curriculum_sampling_override
+            and name in _BOOTSTRAP_CURRICULUM_SAMPLING_FIELDS
         ):
             continue
         parent_value = _normalise_config_value(
@@ -1309,6 +1318,11 @@ def run_experiment(
         frontier_stage = curriculum_state.current_stage(config)
         frontier_length, frontier_pairs = curriculum_state.current_task(config)
         if _is_primary():
+            evaluation_stages = (
+                (frontier_stage,)
+                if config.evaluation_frontier_only
+                else tuple(range(frontier_stage + 1))
+            )
             grid = evaluate_grid(
                 {config.method: model},
                 task_config,
@@ -1316,7 +1330,7 @@ def run_experiment(
                 split="validation",
                 example_count=config.evaluation_examples,
                 device=device,
-                evaluation_stages=tuple(range(frontier_stage + 1)),
+                evaluation_stages=evaluation_stages,
             )
             curriculum_metrics: dict[str, Any] = {
                 "enabled": config.curriculum_enabled,
@@ -1329,14 +1343,22 @@ def run_experiment(
             }
             transition = None
             if config.curriculum_enabled:
-                probe_grid = evaluate_grid(
-                    {config.method: model},
-                    task_config,
-                    config,
-                    split="validation",
-                    example_count=config.curriculum_probe_examples,
-                    device=device,
-                    evaluation_stages=(frontier_stage,),
+                probe_grid = (
+                    grid
+                    if (
+                        config.evaluation_frontier_only
+                        and config.evaluation_examples
+                        == config.curriculum_probe_examples
+                    )
+                    else evaluate_grid(
+                        {config.method: model},
+                        task_config,
+                        config,
+                        split="validation",
+                        example_count=config.curriculum_probe_examples,
+                        device=device,
+                        evaluation_stages=(frontier_stage,),
+                    )
                 )
                 probe_accuracy = probe_grid[0]["accuracy"]
                 if allow_curriculum_advance:
@@ -1542,7 +1564,11 @@ def run_experiment(
         split="test",
         example_count=config.test_examples,
         device=device,
-        evaluation_stages=tuple(range(last_training_stage + 1)),
+        evaluation_stages=(
+            (last_training_stage,)
+            if config.evaluation_frontier_only
+            else tuple(range(last_training_stage + 1))
+        ),
     )
     final_curriculum_probe_grid = (
         evaluate_grid(
@@ -1552,6 +1578,11 @@ def run_experiment(
             split="validation",
             example_count=config.curriculum_probe_examples,
             device=device,
+            evaluation_stages=(
+                (curriculum_state.current_stage(config),)
+                if config.evaluation_frontier_only
+                else None
+            ),
         )
         if config.final_full_curriculum_probe
         else []
@@ -1689,6 +1720,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--evaluation-examples", type=int)
     parser.add_argument("--test-examples", type=int)
     parser.add_argument("--evaluation-interval", type=int)
+    parser.add_argument(
+        "--evaluation-frontier-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--log-interval", type=int)
     parser.add_argument("--wandb-log-interval", type=int)
     parser.add_argument("--sigma", type=float)
@@ -1741,6 +1777,11 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
     )
+    parser.add_argument(
+        "--bootstrap-allow-curriculum-sampling-override",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--resume-checkpoint")
     parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--log-progress", action="store_true")
@@ -1770,6 +1811,7 @@ def _apply_cli_overrides(
         "evaluation_examples",
         "test_examples",
         "evaluation_interval",
+        "evaluation_frontier_only",
         "log_interval",
         "wandb_log_interval",
         "sigma",
@@ -1827,6 +1869,10 @@ def _apply_cli_overrides(
     if args.bootstrap_allow_optimizer_override is not None:
         overrides["bootstrap_allow_optimizer_override"] = (
             args.bootstrap_allow_optimizer_override
+        )
+    if args.bootstrap_allow_curriculum_sampling_override is not None:
+        overrides["bootstrap_allow_curriculum_sampling_override"] = (
+            args.bootstrap_allow_curriculum_sampling_override
         )
     if args.wandb is not None:
         overrides["wandb_enabled"] = args.wandb

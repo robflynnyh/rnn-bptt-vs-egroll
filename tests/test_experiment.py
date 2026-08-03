@@ -199,6 +199,34 @@ def test_elite_experiment_logs_selection_and_actual_update(tmp_path) -> None:
     assert metrics["update_to_parameter_rms_ratio"] > 0
 
 
+def test_frontier_only_evaluation_omits_earlier_stages(tmp_path) -> None:
+    config = replace(
+        smoke_config(seed=21),
+        method="bptt",
+        generations=1,
+        curriculum_enabled=False,
+        evaluation_frontier_only=True,
+        evaluation_interval=1,
+        evaluation_examples=4,
+        curriculum_probe_examples=4,
+        test_examples=4,
+        evaluation_batch_size=4,
+        final_full_curriculum_probe=True,
+    )
+
+    result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
+
+    assert result is not None
+    assert all(
+        [row["sequence_length"] for row in entry["grid"]] == [16]
+        for entry in result["validation_history"]
+    )
+    assert [row["sequence_length"] for row in result["test"]["grid"]] == [16]
+    assert [
+        row["sequence_length"] for row in result["final_curriculum_probe"]["grid"]
+    ] == [16]
+
+
 def test_adaptive_mutation_scales_are_updated_and_recorded(tmp_path) -> None:
     config = replace(
         smoke_config(seed=23),
@@ -332,6 +360,7 @@ def test_completed_run_can_bootstrap_a_longer_target(tmp_path) -> None:
         parent_config,
         generations=3,
         bptt_learning_rate=1e-3,
+        curriculum_frontier_probability=1.0,
         bootstrap_model_path=str(parent_dir / "model.pt"),
         bootstrap_metrics_path=str(metrics_path),
     )
@@ -341,12 +370,22 @@ def test_completed_run_can_bootstrap_a_longer_target(tmp_path) -> None:
             device=torch.device("cpu"),
             config=continuation_config,
         )
+    with pytest.raises(ValueError, match="bootstrap configuration mismatch"):
+        run_experiment(
+            tmp_path / "optimizer-only-override",
+            device=torch.device("cpu"),
+            config=replace(
+                continuation_config,
+                bootstrap_allow_optimizer_override=True,
+            ),
+        )
     continuation = run_experiment(
         tmp_path / "continuation",
         device=torch.device("cpu"),
         config=replace(
             continuation_config,
             bootstrap_allow_optimizer_override=True,
+            bootstrap_allow_curriculum_sampling_override=True,
         ),
     )
 
