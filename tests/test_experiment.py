@@ -415,6 +415,9 @@ def test_full_state_checkpoint_resume_matches_uninterrupted_training(tmp_path) -
         config=replace(config, generations=2),
     )
     checkpoint = interrupted_dir / "checkpoints" / "generation_0000000002.pt"
+    checkpoint_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    checkpoint_payload["config_signature"]["generations"] = 2
+    torch.save(checkpoint_payload, checkpoint)
 
     resumed = run_experiment(
         resumed_dir,

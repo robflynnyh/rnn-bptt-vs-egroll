@@ -626,6 +626,14 @@ def _resume_signature(config: ExperimentConfig) -> dict[str, Any]:
     }
 
 
+def _normalise_resume_signature(signature: dict[str, Any]) -> dict[str, Any]:
+    return {
+        name: _normalise_config_value(value)
+        for name, value in signature.items()
+        if name not in _RESUME_IGNORED_FIELDS
+    }
+
+
 def _load_bootstrap_state(
     config: ExperimentConfig,
     model: VanillaRNN,
@@ -755,7 +763,10 @@ def _load_checkpoint_state(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if checkpoint.get("format_version") != 1:
         raise ValueError("unsupported checkpoint format")
-    if checkpoint.get("config_signature") != _resume_signature(config):
+    saved_signature = checkpoint.get("config_signature")
+    if not isinstance(saved_signature, dict) or (
+        _normalise_resume_signature(saved_signature) != _resume_signature(config)
+    ):
         raise ValueError("resume checkpoint configuration does not match this run")
     generation = int(checkpoint["generation"])
     if generation >= config.generations:
