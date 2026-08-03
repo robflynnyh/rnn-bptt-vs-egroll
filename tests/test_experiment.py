@@ -328,14 +328,25 @@ def test_completed_run_can_bootstrap_a_longer_target(tmp_path) -> None:
     ):
         legacy_metrics["config"].pop(name)
     metrics_path.write_text(json.dumps(legacy_metrics), encoding="utf-8")
+    continuation_config = replace(
+        parent_config,
+        generations=3,
+        bptt_learning_rate=1e-3,
+        bootstrap_model_path=str(parent_dir / "model.pt"),
+        bootstrap_metrics_path=str(metrics_path),
+    )
+    with pytest.raises(ValueError, match="bootstrap configuration mismatch"):
+        run_experiment(
+            tmp_path / "rejected",
+            device=torch.device("cpu"),
+            config=continuation_config,
+        )
     continuation = run_experiment(
         tmp_path / "continuation",
         device=torch.device("cpu"),
         config=replace(
-            parent_config,
-            generations=3,
-            bootstrap_model_path=str(parent_dir / "model.pt"),
-            bootstrap_metrics_path=str(metrics_path),
+            continuation_config,
+            bootstrap_allow_optimizer_override=True,
         ),
     )
 

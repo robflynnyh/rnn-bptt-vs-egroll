@@ -6,7 +6,7 @@ with_gpu="${WITH_GPU:-/store/store5/software/simple-gpu-schedule/with-gpu}"
 gpu_pool="${GPU_POOL:-all}"
 python_bin="${PYTHON_BIN:-$(command -v python || true)}"
 target_generations="${GENERATIONS:-2000000}"
-output_dir="$repo_root/artifacts/gentle_curriculum/seed-7/gentle-tied-long-2m"
+output_dir="$repo_root/artifacts/gentle_curriculum/seed-7/gentle-tied-lr0p1-long-2m"
 parent_dir="$repo_root/artifacts/gentle_curriculum/seed-7/gentle-tied"
 
 if [[ ! -x "$python_bin" ]]; then
@@ -48,6 +48,7 @@ else
     resume_args+=(
         --bootstrap-model-path "$parent_dir/model.pt"
         --bootstrap-metrics-path "$parent_dir/metrics.json"
+        --bootstrap-allow-optimizer-override
     )
 fi
 
@@ -70,9 +71,9 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --no-adaptive-mutation-scales \
     --fitness-shaping zscore \
     --eggroll-update-rule standardized \
-    --eggroll-learning-rate 0.3 \
+    --eggroll-learning-rate 0.1 \
     --eggroll-learning-rate-final 0.01 \
-    --eggroll-learning-rate-decay-start 0 \
+    --eggroll-learning-rate-decay-start 20000 \
     --eggroll-learning-rate-decay-end 100000 \
     --eggroll-weight-decay 0 \
     --curriculum-accuracy-threshold 0.9 \
@@ -88,9 +89,9 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --wandb \
     --wandb-project rnn-bptt-vs-eggroll \
     --wandb-entity wobrob101 \
-    --wandb-run-name gentle-curriculum-gentle-tied-seed7-2m-continuation \
+    --wandb-run-name gentle-curriculum-gentle-tied-seed7-lr0p1-2m \
     --wandb-group eggroll-mqar-gentle-curriculum-long-seed7 \
-    --wandb-run-id tied2m7b \
+    --wandb-run-id tiedlr10 \
     --wandb-resume allow \
     --wandb-log-interval 1 \
     --log-progress \

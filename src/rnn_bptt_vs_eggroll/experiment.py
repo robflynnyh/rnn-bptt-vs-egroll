@@ -146,6 +146,7 @@ class ExperimentConfig:
     wandb_resume: str | None = None
     bootstrap_model_path: str | None = None
     bootstrap_metrics_path: str | None = None
+    bootstrap_allow_optimizer_override: bool = False
     resume_checkpoint: str | None = None
     checkpoint_interval: int | None = None
     log_progress: bool = False
@@ -458,6 +459,7 @@ _RESUME_IGNORED_FIELDS = {
     "wandb_resume",
     "bootstrap_model_path",
     "bootstrap_metrics_path",
+    "bootstrap_allow_optimizer_override",
     "resume_checkpoint",
     "checkpoint_interval",
     "log_interval",
@@ -469,6 +471,18 @@ _LEGACY_CONFIG_DEFAULTS = {
     "mutation_scale_learning_rate": 0.5,
     "mutation_scale_min": 0.1,
     "mutation_scale_max": 10.0,
+}
+_BOOTSTRAP_OPTIMIZER_FIELDS = {
+    "eggroll_learning_rate",
+    "eggroll_learning_rate_decay",
+    "eggroll_learning_rate_final",
+    "eggroll_learning_rate_decay_start",
+    "eggroll_learning_rate_decay_end",
+    "eggroll_weight_decay",
+    "eggroll_momentum",
+    "bptt_learning_rate",
+    "bptt_learning_rate_decay",
+    "bptt_weight_decay",
 }
 
 
@@ -502,6 +516,11 @@ def _load_bootstrap_state(
     parent_config = metrics["config"]
     mismatches = []
     for name in _BOOTSTRAP_MATCH_FIELDS:
+        if (
+            config.bootstrap_allow_optimizer_override
+            and name in _BOOTSTRAP_OPTIMIZER_FIELDS
+        ):
+            continue
         parent_value = _normalise_config_value(
             parent_config.get(name, _LEGACY_CONFIG_DEFAULTS.get(name))
         )
@@ -1717,6 +1736,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb-resume", choices=("allow", "must", "never"))
     parser.add_argument("--bootstrap-model-path")
     parser.add_argument("--bootstrap-metrics-path")
+    parser.add_argument(
+        "--bootstrap-allow-optimizer-override",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--resume-checkpoint")
     parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--log-progress", action="store_true")
@@ -1800,6 +1824,10 @@ def _apply_cli_overrides(
         overrides["random_non_queries"] = args.random_non_queries
     if args.adaptive_mutation_scales is not None:
         overrides["adaptive_mutation_scales"] = args.adaptive_mutation_scales
+    if args.bootstrap_allow_optimizer_override is not None:
+        overrides["bootstrap_allow_optimizer_override"] = (
+            args.bootstrap_allow_optimizer_override
+        )
     if args.wandb is not None:
         overrides["wandb_enabled"] = args.wandb
     overrides["log_progress"] = args.log_progress
