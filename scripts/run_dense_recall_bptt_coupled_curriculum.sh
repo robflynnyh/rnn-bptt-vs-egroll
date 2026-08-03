@@ -6,6 +6,7 @@ with_gpu="${WITH_GPU:-/store/store5/software/simple-gpu-schedule/with-gpu}"
 gpu_pool="${GPU_POOL:-all}"
 python_bin="${PYTHON_BIN:-/store/store4/software/bin/anaconda3/envs/flash_attn_pytorch2/bin/python}"
 target_generations="${GENERATIONS:-2000000}"
+max_updates_per_stage="${CURRICULUM_MAX_UPDATES_PER_STAGE:-200000}"
 output_dir="${OUTPUT_DIR:-$repo_root/artifacts/dense_recall/seed-7/bptt-lstm-tied-coupled-vocab}"
 wandb_run_id="${WANDB_RUN_ID:-bpttcv01}"
 
@@ -17,12 +18,17 @@ if [[ ! "$target_generations" =~ ^[0-9]+$ ]] || (( target_generations < 1 )); th
     echo "GENERATIONS must be a positive integer" >&2
     exit 2
 fi
+if [[ ! "$max_updates_per_stage" =~ ^[0-9]+$ ]] || (( max_updates_per_stage < 1 )); then
+    echo "CURRICULUM_MAX_UPDATES_PER_STAGE must be a positive integer" >&2
+    exit 2
+fi
 
 if [[ "${DENSE_RECALL_BPTT_ON_GPU:-0}" != 1 ]]; then
     exec "$with_gpu" "$gpu_pool" --num 1 -- env \
         DENSE_RECALL_BPTT_ON_GPU=1 \
         PYTHON_BIN="$python_bin" \
         GENERATIONS="$target_generations" \
+        CURRICULUM_MAX_UPDATES_PER_STAGE="$max_updates_per_stage" \
         OUTPUT_DIR="$output_dir" \
         WANDB_RUN_ID="$wandb_run_id" \
         bash "$0" "$@"
@@ -61,7 +67,7 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --bptt-weight-decay 0 \
     --bptt-gradient-clip 5 \
     --curriculum-accuracy-threshold 0.9 \
-    --curriculum-max-updates-per-stage 100000 \
+    --curriculum-max-updates-per-stage "$max_updates_per_stage" \
     --curriculum-frontier-probability 1 \
     --curriculum-probe-examples 512 \
     --no-final-full-curriculum-probe \
