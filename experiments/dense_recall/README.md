@@ -51,4 +51,5 @@ was stopped after 22,300 generations. It promoted at generation 17,500 with
 90.82% one-pair accuracy, but the two-pair probe immediately fell to 37.11%
 and had declined to 32.62% when stopped. Its generation-20,000 checkpoint is
 retained as negative evidence. The replacement from-two run uses a separate
-output directory and W&B identity so it cannot resume the failed trajectory.
+output directory and W&B identity so it cannot resume the failed trajectory:
+[`densekv2a`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/densekv2a).
