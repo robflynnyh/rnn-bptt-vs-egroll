@@ -1786,6 +1786,33 @@ def run_experiment(
                 print(json.dumps({"stopping": stopping_reason}), flush=True)
             break
 
+    terminal_checkpoint_path: Path | None = None
+    if config.checkpoint_interval is not None and _is_primary():
+        terminal_checkpoint_path = _checkpoint_path(
+            output_dir, completed_generation,
+        )
+        if not terminal_checkpoint_path.exists():
+            terminal_checkpoint_path = _save_checkpoint(
+                output_dir,
+                config,
+                model,
+                optimizer,
+                curriculum_state,
+                generation=completed_generation,
+                current_sigma=current_sigma,
+                mutation_scales=mutation_scales,
+                data_generator=data_generator,
+                stage_generator=stage_generator,
+                noise_generator=noise_generator,
+                method_seconds=method_seconds,
+                last_training_stage=last_training_stage,
+            )
+        if config.log_progress:
+            print(
+                json.dumps({"terminal_checkpoint": str(terminal_checkpoint_path)}),
+                flush=True,
+            )
+
     _synchronize(device)
     experiment_seconds = time.perf_counter() - experiment_start
     if not _is_primary():
@@ -1875,6 +1902,11 @@ def run_experiment(
         "validation_history": validation_history,
         "update_history": update_history,
         "stopping": stopping_reason,
+        "terminal_checkpoint": (
+            str(terminal_checkpoint_path)
+            if terminal_checkpoint_path is not None
+            else None
+        ),
         "curriculum": {
             "enabled": config.curriculum_enabled,
             "last_trained_stage": last_training_stage,

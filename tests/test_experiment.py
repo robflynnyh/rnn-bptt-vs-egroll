@@ -136,6 +136,7 @@ def test_dense_recall_stops_after_stage_update_budget(tmp_path) -> None:
         test_examples=4,
         evaluation_batch_size=128,
         generations=10,
+        checkpoint_interval=100,
     )
 
     result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
@@ -154,6 +155,8 @@ def test_dense_recall_stops_after_stage_update_budget(tmp_path) -> None:
         "best_accuracy": 0.0,
         "accuracy_threshold": 1.0,
     }
+    assert result["terminal_checkpoint"].endswith("generation_0000000001.pt")
+    assert (tmp_path / "checkpoints" / "generation_0000000001.pt").is_file()
 
 
 def test_eggroll_learning_rate_holds_then_cosine_decays() -> None:
