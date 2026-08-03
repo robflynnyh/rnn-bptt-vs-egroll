@@ -63,3 +63,14 @@ plateau comes from EGGROLL or from the task/model combination:
 ```bash
 bash scripts/run_dense_recall_bptt_n2.sh
 ```
+
+The control completed 20,000 updates:
+[`bpttn2a`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/bpttn2a).
+Validation accuracy was 48.24% and final test accuracy was 46.68%. On a separate
+fixed 4,096-example diagnostic, 92.43% of predictions were one of the two
+stored values, but changing only the query key changed the prediction on just
+17.68% of examples. Accuracy was similar when querying the first pair (47.29%)
+or second pair (43.48%). BPTT therefore learned to emit a stored value but did
+not reliably use the query to select its binding. The EGGROLL plateau is not
+solely an evolution-optimizer failure: this plain tanh RNN and objective also
+present a strong fixed-position/value-selection shortcut to gradient descent.
