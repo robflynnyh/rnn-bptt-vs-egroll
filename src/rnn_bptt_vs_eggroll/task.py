@@ -142,6 +142,7 @@ def sample_dense_recall_batch(
     config: MQARConfig,
     *,
     generator: torch.Generator,
+    active_vocab_size: int | None = None,
 ) -> MQARBatch:
     """Generate context and a query; the target is the omitted final answer token."""
 
@@ -151,13 +152,22 @@ def sample_dense_recall_batch(
         raise ValueError("num_kv_pairs must be positive")
     if num_kv_pairs >= config.key_vocab_size:
         raise ValueError("num_kv_pairs exceeds the available key vocabulary")
+    if active_vocab_size is None:
+        active_key_count = config.key_vocab_size - 1
+        active_value_count = config.key_vocab_size
+    else:
+        if not num_kv_pairs <= active_vocab_size < config.key_vocab_size:
+            raise ValueError(
+                "active_vocab_size must fit all pairs and the key namespace"
+            )
+        active_key_count = active_vocab_size
+        active_value_count = active_vocab_size
 
-    key_choice_count = config.key_vocab_size - 1
     keys = 1 + _sample_without_replacement(
-        batch_size, key_choice_count, num_kv_pairs, generator=generator,
+        batch_size, active_key_count, num_kv_pairs, generator=generator,
     )
     values = config.key_vocab_size + _sample_without_replacement(
-        batch_size, config.key_vocab_size, num_kv_pairs, generator=generator,
+        batch_size, active_value_count, num_kv_pairs, generator=generator,
     )
     query_indices = torch.randint(
         num_kv_pairs, (batch_size,), generator=generator,

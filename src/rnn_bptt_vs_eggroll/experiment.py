@@ -126,6 +126,7 @@ class ExperimentConfig:
     curriculum_accuracy_threshold: float = 0.9
     curriculum_frontier_probability: float = 0.5
     curriculum_probe_examples: int = 512
+    dense_recall_coupled_vocab: bool = False
     final_full_curriculum_probe: bool = False
     evaluation_examples: int = 1_024
     test_examples: int = 4_096
@@ -256,6 +257,10 @@ class ExperimentConfig:
         ):
             raise ValueError(
                 "dense-recall task requires its named schedule or a custom schedule"
+            )
+        if self.dense_recall_coupled_vocab and self.task != "dense-recall":
+            raise ValueError(
+                "coupled vocabulary curriculum requires the dense-recall task"
             )
         if not 0 <= self.curriculum_accuracy_threshold <= 1:
             raise ValueError("curriculum_accuracy_threshold must be in [0, 1]")
@@ -424,7 +429,13 @@ def _sample_task_batch(
         if sequence_length != 2 * num_kv_pairs + 2:
             raise ValueError("dense-recall stage has inconsistent sequence length")
         batch = sample_dense_recall_batch(
-            batch_size, num_kv_pairs, task_config, generator=generator,
+            batch_size,
+            num_kv_pairs,
+            task_config,
+            generator=generator,
+            active_vocab_size=(
+                num_kv_pairs if config.dense_recall_coupled_vocab else None
+            ),
         )
         if batch.sequence_length + 1 != sequence_length:
             raise AssertionError("dense-recall input must omit the answer token")
@@ -510,6 +521,7 @@ _BOOTSTRAP_MATCH_FIELDS = (
     "curriculum_accuracy_threshold",
     "curriculum_frontier_probability",
     "curriculum_probe_examples",
+    "dense_recall_coupled_vocab",
     "evaluation_examples",
     "evaluation_batch_size",
     "evaluation_interval",
@@ -570,6 +582,7 @@ _LEGACY_CONFIG_DEFAULTS = {
     "mutation_scale_learning_rate": 0.5,
     "mutation_scale_min": 0.1,
     "mutation_scale_max": 10.0,
+    "dense_recall_coupled_vocab": False,
 }
 _BOOTSTRAP_OPTIMIZER_FIELDS = {
     "eggroll_learning_rate",
@@ -1876,6 +1889,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--curriculum-frontier-probability", type=float)
     parser.add_argument("--curriculum-probe-examples", type=int)
     parser.add_argument(
+        "--dense-recall-coupled-vocab",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument(
         "--final-full-curriculum-probe",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1973,6 +1991,7 @@ def _apply_cli_overrides(
         "curriculum_accuracy_threshold",
         "curriculum_frontier_probability",
         "curriculum_probe_examples",
+        "dense_recall_coupled_vocab",
         "evaluation_examples",
         "test_examples",
         "evaluation_interval",

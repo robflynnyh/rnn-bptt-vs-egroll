@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from rnn_bptt_vs_eggroll.task import (
@@ -89,3 +90,33 @@ def test_dense_recall_has_unique_pairs_and_one_omitted_answer() -> None:
         query = batch.inputs[row, -1]
         matching_pair = batch.keys[row].eq(query).nonzero().item()
         assert batch.targets[row, -1] == batch.values[row, matching_pair]
+
+
+def test_dense_recall_can_couple_active_vocabulary_to_pair_count() -> None:
+    config = MQARConfig(vocab_size=64)
+    batch = sample_dense_recall_batch(
+        128,
+        num_kv_pairs=2,
+        config=config,
+        generator=torch.Generator().manual_seed(51),
+        active_vocab_size=4,
+    )
+
+    assert torch.all(batch.keys >= 1)
+    assert torch.all(batch.keys <= 4)
+    assert torch.all(batch.values >= config.key_vocab_size)
+    assert torch.all(batch.values < config.key_vocab_size + 4)
+    assert torch.all(batch.keys[:, 0] != batch.keys[:, 1])
+    assert torch.all(batch.values[:, 0] != batch.values[:, 1])
+
+
+def test_dense_recall_rejects_too_few_active_tokens() -> None:
+    config = MQARConfig(vocab_size=64)
+    with pytest.raises(ValueError, match="active_vocab_size"):
+        sample_dense_recall_batch(
+            4,
+            num_kv_pairs=2,
+            config=config,
+            generator=torch.Generator().manual_seed(52),
+            active_vocab_size=1,
+        )
