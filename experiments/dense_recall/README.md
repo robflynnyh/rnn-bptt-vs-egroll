@@ -41,4 +41,5 @@ bash scripts/run_dense_recall_curriculum.sh
 
 W&B training metrics are logged every generation, frontier evaluation every
 100 generations, and atomic resumable checkpoints every 20,000 generations.
-The run is tracked as `densekv07` in the `rnn-bptt-vs-eggroll` project.
+The seed-7 run is tracked as
+[`densekv07`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/densekv07).
