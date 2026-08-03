@@ -134,3 +134,55 @@ def sample_batch(
         sequence_length=sequence_length,
         num_kv_pairs=num_kv_pairs,
     )
+
+
+def sample_dense_recall_batch(
+    batch_size: int,
+    num_kv_pairs: int,
+    config: MQARConfig,
+    *,
+    generator: torch.Generator,
+) -> MQARBatch:
+    """Generate context and a query; the target is the omitted final answer token."""
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if num_kv_pairs < 1:
+        raise ValueError("num_kv_pairs must be positive")
+    if num_kv_pairs >= config.key_vocab_size:
+        raise ValueError("num_kv_pairs exceeds the available key vocabulary")
+
+    key_choice_count = config.key_vocab_size - 1
+    keys = 1 + _sample_without_replacement(
+        batch_size, key_choice_count, num_kv_pairs, generator=generator,
+    )
+    values = config.key_vocab_size + _sample_without_replacement(
+        batch_size, config.key_vocab_size, num_kv_pairs, generator=generator,
+    )
+    query_indices = torch.randint(
+        num_kv_pairs, (batch_size,), generator=generator,
+    )
+    batch_indices = torch.arange(batch_size)
+    query_keys = keys[batch_indices, query_indices]
+    query_values = values[batch_indices, query_indices]
+
+    sequence_length = 2 * num_kv_pairs + 1
+    inputs = torch.empty(batch_size, sequence_length, dtype=torch.long)
+    inputs[:, : 2 * num_kv_pairs : 2] = keys
+    inputs[:, 1 : 2 * num_kv_pairs : 2] = values
+    inputs[:, -1] = query_keys
+
+    targets = torch.full_like(inputs, IGNORE_INDEX)
+    targets[:, -1] = query_values
+    query_positions = torch.full(
+        (batch_size, 1), sequence_length - 1, dtype=torch.long,
+    )
+    return MQARBatch(
+        inputs=inputs,
+        targets=targets,
+        keys=keys,
+        values=values,
+        query_positions=query_positions,
+        sequence_length=sequence_length,
+        num_kv_pairs=num_kv_pairs,
+    )

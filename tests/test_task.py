@@ -1,6 +1,11 @@
 import torch
 
-from rnn_bptt_vs_eggroll.task import IGNORE_INDEX, MQARConfig, sample_batch
+from rnn_bptt_vs_eggroll.task import (
+    IGNORE_INDEX,
+    MQARConfig,
+    sample_batch,
+    sample_dense_recall_batch,
+)
 
 
 def test_batch_matches_zoology_mqar_layout() -> None:
@@ -60,3 +65,27 @@ def test_random_non_queries_only_changes_filler_tokens() -> None:
     assert torch.equal(random.inputs[content_mask], fixed.inputs[content_mask])
     assert torch.equal(random.targets, fixed.targets)
     assert torch.any(random.inputs[~content_mask].ne(0))
+
+
+def test_dense_recall_has_unique_pairs_and_one_omitted_answer() -> None:
+    config = MQARConfig(vocab_size=64)
+    batch = sample_dense_recall_batch(
+        8,
+        num_kv_pairs=4,
+        config=config,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    assert batch.inputs.shape == (8, 9)
+    assert batch.targets.shape == (8, 9)
+    assert torch.equal(batch.inputs[:, :8:2], batch.keys)
+    assert torch.equal(batch.inputs[:, 1:8:2], batch.values)
+    assert torch.all(batch.targets.ne(IGNORE_INDEX).sum(dim=1) == 1)
+    assert torch.all(batch.query_positions == 8)
+
+    for row in range(8):
+        assert batch.keys[row].unique().numel() == 4
+        assert batch.values[row].unique().numel() == 4
+        query = batch.inputs[row, -1]
+        matching_pair = batch.keys[row].eq(query).nonzero().item()
+        assert batch.targets[row, -1] == batch.values[row, matching_pair]

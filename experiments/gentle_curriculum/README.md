@@ -108,7 +108,7 @@ decisions, and conclusions will be added after the bounded runs complete.
 | Long tied continuation, initial logging | 7 | Gentle, tied input/output | 1,600 continuation generations | [`tied2m07`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tied2m07) | Superseded to log every update |
 | Long tied continuation, original LR | 7 | Gentle, tied input/output | 70,400 total | [`tied2m7b`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tied2m7b) | Stopped after sustained regression; continuation checkpoints removed |
 | Long tied continuation, LR 0.1 | 7 | Gentle, tied input/output | 21,400 total | [`tiedlr10`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tiedlr10) | Stopped after early mixed-curriculum regression |
-| Frontier-only continuation, LR 0.1 | 7 | Gentle, tied input/output, frontier only | 2,000,000 ceiling | [`tiedfr10`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tiedfr10) | Active; bootstrapped at generation 20,000 |
+| Frontier-only continuation, LR 0.1 | 7 | Gentle, tied input/output, frontier only | 2,000 continuation generations | [`tiedfr10`](https://wandb.ai/wobrob101/rnn-bptt-vs-egroll/runs/tiedfr10) | Stopped after regression; output removed |
 
 The scheduled-LR reference used the same seed, model, Cartesian population,
 batch, BF16 candidate forwards, rank-1 perturbations, `sigma`, z-score update,
@@ -161,19 +161,10 @@ not part of this focused continuation: periodic validation and final testing
 also evaluate only the active frontier. The fixed 512-example frontier
 evaluation is reused as the curriculum gate instead of being computed twice.
 
-The frontier-only continuation loads the parent model, curriculum stage,
-transition history, mutation scales, and cumulative training time. It starts
-EGGROLL at learning rate 0.1 and cosine-decays it to 0.01 between generations
-20,000 and 100,000. The old parent did not save RNG or optimizer state, so its
-first continuation segment uses new, deterministic data and perturbation
-streams. From generation 40,000 onward, atomic full-state checkpoints every
-20,000 generations preserve exact model, optimizer, curriculum,
-mutation-scale, and RNG continuity. Relaunching
-`scripts/run_tied_long_continuation.sh` automatically selects the newest such
-checkpoint. The 2,000,000-generation value is a manual-stop ceiling, not a
-claim that all of that compute is required. Training metrics are sent to W&B
-after every update; local in-memory and JSON history remains sampled every 100
-generations so it stays bounded.
+The frontier-only continuation isolated the newly promoted two-pair task but
+still regressed, so it was stopped before its first checkpoint. Its temporary
+output was removed. The successful generation-20,000 tied parent remains the
+only retained continuation source from this study.
 
 ## Interim matched diagnostics
 

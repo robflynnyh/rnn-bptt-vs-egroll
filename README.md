@@ -89,6 +89,21 @@ the exact protocol.
 Training metrics log independently every generation by default; use
 `--log-interval` to reduce their frequency without changing validation.
 
+### Dense single-query recall
+
+The `dense-recall` schedule instead stores a distinct key-value pair at every
+context position and queries one uniformly selected key. Stage `N` contains
+`N` pairs and advances to `N+1` after one passing probe. The reported full
+length is `2N+2`, including the answer that the RNN must predict; the actual
+model input length is `2N+1` because that final answer is omitted.
+
+```bash
+bash scripts/run_dense_recall_curriculum.sh
+```
+
+See the [dense-recall protocol](experiments/dense_recall/README.md) for the
+fixed optimizer and stopping configuration.
+
 ## Methods
 
 Matching seeds produce byte-identical initial parameters in the same RNN.

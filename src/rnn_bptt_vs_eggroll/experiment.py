@@ -1,4 +1,4 @@
-"""Train one RNN with BPTT or forward-only EGGROLL on associative recall."""
+"""Train one RNN with BPTT or forward-only EGGROLL on recall tasks."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .eggroll import (
     shape_fitness,
 )
 from .model import VanillaRNN
-from .task import IGNORE_INDEX, MQARConfig, sample_batch
+from .task import IGNORE_INDEX, MQARConfig, sample_batch, sample_dense_recall_batch
 
 
 REFERENCE_CURRICULUM: tuple[tuple[int, int], ...] = (
@@ -49,9 +49,14 @@ GENTLE_CURRICULUM: tuple[tuple[int, int], ...] = (
     (14, 1),
     *REFERENCE_CURRICULUM,
 )
+DENSE_RECALL_CURRICULUM: tuple[tuple[int, int], ...] = tuple(
+    (2 * num_kv_pairs + 2, num_kv_pairs)
+    for num_kv_pairs in range(1, 1_025)
+)
 CURRICULUM_SCHEDULES = {
     "reference": REFERENCE_CURRICULUM,
     "gentle": GENTLE_CURRICULUM,
+    "dense-recall": DENSE_RECALL_CURRICULUM,
 }
 
 
@@ -62,6 +67,24 @@ def logical_query_span(sequence_length: int, num_kv_pairs: int) -> int:
     if remaining_tokens < 2 or remaining_tokens % 2:
         raise ValueError("MQAR context must leave a positive integer query span")
     return remaining_tokens // 2
+
+
+def task_size(
+    config: "ExperimentConfig", sequence_length: int, num_kv_pairs: int,
+) -> int:
+    """Return the active curriculum unit for task-agnostic reporting."""
+
+    if config.task == "dense-recall":
+        return num_kv_pairs
+    return logical_query_span(sequence_length, num_kv_pairs)
+
+
+def task_logical_query_span(
+    config: "ExperimentConfig", sequence_length: int, num_kv_pairs: int,
+) -> int | None:
+    if config.task == "dense-recall":
+        return None
+    return logical_query_span(sequence_length, num_kv_pairs)
 
 
 def apply_curriculum_schedule(
@@ -75,6 +98,7 @@ def apply_curriculum_schedule(
         raise ValueError(f"unknown curriculum schedule: {schedule}") from error
     return replace(
         config,
+        task="dense-recall" if schedule == "dense-recall" else "mqar",
         curriculum_schedule=schedule,
         curriculum_sequence_lengths=tuple(length for length, _ in tasks),
         curriculum_num_kv_pairs=tuple(pairs for _, pairs in tasks),
@@ -84,6 +108,7 @@ def apply_curriculum_schedule(
 @dataclass(frozen=True)
 class ExperimentConfig:
     method: str = "bptt"
+    task: str = "mqar"
     seed: int = 7
     generations: int = 3_000
     batch_size: int = 256
@@ -156,12 +181,16 @@ class ExperimentConfig:
     def __post_init__(self) -> None:
         if self.method not in {"bptt", "eggroll"}:
             raise ValueError("method must be 'bptt' or 'eggroll'")
+        if self.task not in {"mqar", "dense-recall"}:
+            raise ValueError("task must be mqar or dense-recall")
         if self.generations < 1 or self.batch_size < 1:
             raise ValueError("generations and batch_size must be positive")
         if not self.curriculum_sequence_lengths:
             raise ValueError("curriculum must contain at least one stage")
         if self.curriculum_schedule not in {
-            "reference", "gentle", "smoke", "custom",
+            *CURRICULUM_SCHEDULES,
+            "smoke",
+            "custom",
         }:
             raise ValueError("unknown curriculum schedule label")
         if len(self.curriculum_sequence_lengths) != len(self.curriculum_num_kv_pairs):
@@ -172,17 +201,32 @@ class ExperimentConfig:
             raise ValueError(
                 "curriculum sequence lengths must be unique and increasing"
             )
-        if any(length < 4 or length % 2 for length in self.curriculum_sequence_lengths):
-            raise ValueError("curriculum sequence lengths must be positive and even")
         if any(pairs < 1 for pairs in self.curriculum_num_kv_pairs):
             raise ValueError("curriculum pair counts must be positive")
-        if any(
-            4 * pairs > length
+        if self.task == "mqar":
+            if any(
+                length < 4 or length % 2
+                for length in self.curriculum_sequence_lengths
+            ):
+                raise ValueError(
+                    "MQAR curriculum sequence lengths must be positive and even"
+                )
+            if any(
+                4 * pairs > length
+                for length, pairs in zip(
+                    self.curriculum_sequence_lengths,
+                    self.curriculum_num_kv_pairs,
+                )
+            ):
+                raise ValueError("every MQAR stage needs context and query slots")
+        elif any(
+            length != 2 * pairs + 2
             for length, pairs in zip(
-                self.curriculum_sequence_lengths, self.curriculum_num_kv_pairs,
+                self.curriculum_sequence_lengths,
+                self.curriculum_num_kv_pairs,
             )
         ):
-            raise ValueError("every curriculum stage needs context and query slots")
+            raise ValueError("dense-recall stages must have full length 2N+2")
         tasks = tuple(zip(
             self.curriculum_sequence_lengths, self.curriculum_num_kv_pairs,
         ))
@@ -191,6 +235,17 @@ class ExperimentConfig:
             and tasks != CURRICULUM_SCHEDULES[self.curriculum_schedule]
         ):
             raise ValueError("named curriculum schedule does not match its stages")
+        if self.curriculum_schedule == "dense-recall" and self.task != "dense-recall":
+            raise ValueError(
+                "dense-recall task and named schedule must be selected together"
+            )
+        if (
+            self.task == "dense-recall"
+            and self.curriculum_schedule not in {"dense-recall", "custom", "smoke"}
+        ):
+            raise ValueError(
+                "dense-recall task requires its named schedule or a custom schedule"
+            )
         if not 0 <= self.curriculum_accuracy_threshold <= 1:
             raise ValueError("curriculum_accuracy_threshold must be in [0, 1]")
         if not 0 <= self.curriculum_frontier_probability <= 1:
@@ -199,7 +254,7 @@ class ExperimentConfig:
             raise ValueError("curriculum_probe_examples must be positive")
         if self.vocab_size <= max(self.curriculum_sequence_lengths):
             raise ValueError(
-                "Zoology MQAR requires vocab_size above every sequence length"
+                "vocab_size must exceed every reported sequence length"
             )
         if max(self.curriculum_num_kv_pairs) >= self.vocab_size // 2:
             raise ValueError("pair count exceeds the available key vocabulary")
@@ -345,6 +400,33 @@ class CurriculumState:
         )
 
 
+def _sample_task_batch(
+    config: ExperimentConfig,
+    task_config: MQARConfig,
+    batch_size: int,
+    sequence_length: int,
+    num_kv_pairs: int,
+    *,
+    generator: torch.Generator,
+):
+    if config.task == "dense-recall":
+        if sequence_length != 2 * num_kv_pairs + 2:
+            raise ValueError("dense-recall stage has inconsistent sequence length")
+        batch = sample_dense_recall_batch(
+            batch_size, num_kv_pairs, task_config, generator=generator,
+        )
+        if batch.sequence_length + 1 != sequence_length:
+            raise AssertionError("dense-recall input must omit the answer token")
+        return batch
+    return sample_batch(
+        batch_size,
+        sequence_length,
+        num_kv_pairs,
+        task_config,
+        generator=generator,
+    )
+
+
 def _world_size() -> int:
     return dist.get_world_size() if dist.is_initialized() else 1
 
@@ -406,6 +488,7 @@ def _state_checksum(model: VanillaRNN) -> str:
 
 _BOOTSTRAP_MATCH_FIELDS = (
     "method",
+    "task",
     "seed",
     "batch_size",
     "curriculum_enabled",
@@ -705,9 +788,7 @@ def _validation_wandb_metrics(entry: dict[str, Any], method: str,) -> dict[str, 
                 "curriculum/sequence_length": float(
                     curriculum["sequence_length_after_probe"]
                 ),
-                "curriculum/logical_query_span": float(
-                    curriculum["logical_query_span_after_probe"]
-                ),
+                "curriculum/task_size": float(curriculum["task_size_after_probe"]),
                 "curriculum/num_kv_pairs": float(
                     curriculum["num_kv_pairs_after_probe"]
                 ),
@@ -715,6 +796,10 @@ def _validation_wandb_metrics(entry: dict[str, Any], method: str,) -> dict[str, 
                 "curriculum/advanced": float(curriculum["transition"] is not None),
             }
         )
+        if curriculum["logical_query_span_after_probe"] is not None:
+            metrics["curriculum/logical_query_span"] = float(
+                curriculum["logical_query_span_after_probe"]
+            )
     for row in entry["grid"]:
         prefix = (
             f"validation_grid/seq_len_{row['sequence_length']}"
@@ -722,9 +807,11 @@ def _validation_wandb_metrics(entry: dict[str, Any], method: str,) -> dict[str, 
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
-        metrics[f"{prefix}/logical_query_span"] = float(
-            row["logical_query_span"]
-        )
+        metrics[f"{prefix}/task_size"] = float(row["task_size"])
+        if row["logical_query_span"] is not None:
+            metrics[f"{prefix}/logical_query_span"] = float(
+                row["logical_query_span"]
+            )
     return metrics
 
 
@@ -733,19 +820,23 @@ def _update_wandb_metrics(entry: dict[str, Any]) -> dict[str, float]:
         "generation": float(entry["generation"]),
         "train/sampled_stage": float(entry["sampled_stage"]),
         "train/sampled_sequence_length": float(entry["sampled_sequence_length"]),
-        "train/sampled_logical_query_span": float(
-            entry["sampled_logical_query_span"]
-        ),
+        "train/sampled_task_size": float(entry["sampled_task_size"]),
         "train/sampled_num_kv_pairs": float(entry["sampled_num_kv_pairs"]),
         "train/curriculum_stage": float(entry["curriculum_stage"]),
         "train/curriculum_sequence_length": float(entry["curriculum_sequence_length"]),
-        "train/curriculum_logical_query_span": float(
-            entry["curriculum_logical_query_span"]
-        ),
+        "train/curriculum_task_size": float(entry["curriculum_task_size"]),
         "train/curriculum_num_kv_pairs": float(entry["curriculum_num_kv_pairs"]),
         "train/unique_sequences_seen": float(entry["unique_training_sequences_seen"]),
         "train/learning_rate": entry["learning_rate"],
     }
+    if entry["sampled_logical_query_span"] is not None:
+        metrics["train/sampled_logical_query_span"] = float(
+            entry["sampled_logical_query_span"]
+        )
+    if entry["curriculum_logical_query_span"] is not None:
+        metrics["train/curriculum_logical_query_span"] = float(
+            entry["curriculum_logical_query_span"]
+        )
     if "sigma" in entry:
         metrics["train/sigma"] = entry["sigma"]
     metrics.update({f"train/{name}": value for name, value in entry["metrics"].items()})
@@ -761,13 +852,17 @@ def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
         "curriculum/final_trained_sequence_length": float(
             results["curriculum"]["last_trained_sequence_length"]
         ),
-        "curriculum/final_trained_logical_query_span": float(
-            results["curriculum"]["last_trained_logical_query_span"]
+        "curriculum/final_trained_task_size": float(
+            results["curriculum"]["last_trained_task_size"]
         ),
         "curriculum/final_trained_num_kv_pairs": float(
             results["curriculum"]["last_trained_num_kv_pairs"]
         ),
     }
+    if results["curriculum"]["last_trained_logical_query_span"] is not None:
+        metrics["curriculum/final_trained_logical_query_span"] = float(
+            results["curriculum"]["last_trained_logical_query_span"]
+        )
     for name, value in results["test"]["summary"][method].items():
         if value is not None:
             metrics[f"test/{name}"] = value
@@ -778,9 +873,11 @@ def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
-        metrics[f"{prefix}/logical_query_span"] = float(
-            row["logical_query_span"]
-        )
+        metrics[f"{prefix}/task_size"] = float(row["task_size"])
+        if row["logical_query_span"] is not None:
+            metrics[f"{prefix}/logical_query_span"] = float(
+                row["logical_query_span"]
+            )
     for row in results["final_curriculum_probe"]["grid"]:
         prefix = (
             f"final_curriculum_probe/seq_len_{row['sequence_length']}"
@@ -788,9 +885,11 @@ def _test_wandb_metrics(results: dict[str, Any],) -> dict[str, float]:
         )
         metrics[f"{prefix}/accuracy"] = row["accuracy"]
         metrics[f"{prefix}/loss"] = row["loss"]
-        metrics[f"{prefix}/logical_query_span"] = float(
-            row["logical_query_span"]
-        )
+        metrics[f"{prefix}/task_size"] = float(row["task_size"])
+        if row["logical_query_span"] is not None:
+            metrics[f"{prefix}/logical_query_span"] = float(
+                row["logical_query_span"]
+            )
     return metrics
 
 
@@ -851,7 +950,7 @@ def _model_gradient_rms(model: VanillaRNN) -> float:
 def _sample_training_stage(
     config: ExperimentConfig, state: CurriculumState, *, generator: torch.Generator,
 ) -> int:
-    """Sample a reached Zoology stage, with explicit frontier rehearsal."""
+    """Sample a reached task stage, with explicit frontier rehearsal."""
 
     frontier = state.current_stage(config)
     if frontier == 0:
@@ -880,16 +979,20 @@ def update_curriculum(
     if state.stage == len(config.curriculum_sequence_lengths) - 1:
         return None
     previous_length, previous_pairs = state.current_task(config)
-    previous_span = logical_query_span(previous_length, previous_pairs)
+    previous_span = task_logical_query_span(config, previous_length, previous_pairs)
     state.stage += 1
     next_length, next_pairs = state.current_task(config)
     transition = {
         "generation": generation,
         "from_sequence_length": previous_length,
         "from_logical_query_span": previous_span,
+        "from_task_size": task_size(config, previous_length, previous_pairs),
         "from_num_kv_pairs": previous_pairs,
         "to_sequence_length": next_length,
-        "to_logical_query_span": logical_query_span(next_length, next_pairs),
+        "to_logical_query_span": task_logical_query_span(
+            config, next_length, next_pairs,
+        ),
+        "to_task_size": task_size(config, next_length, next_pairs),
         "to_num_kv_pairs": next_pairs,
         "frontier_accuracy": accuracy,
         "threshold": config.curriculum_accuracy_threshold,
@@ -1138,11 +1241,12 @@ def evaluate_grid(
         seen = 0
         while seen < example_count:
             current_size = min(config.evaluation_batch_size, example_count - seen)
-            batch = sample_batch(
+            batch = _sample_task_batch(
+                config,
+                task_config,
                 current_size,
                 sequence_length,
                 num_kv_pairs,
-                task_config,
                 generator=generator,
             ).to(device)
             readout_mask = batch.targets.ne(IGNORE_INDEX)
@@ -1158,16 +1262,18 @@ def evaluate_grid(
                     logits.argmax(dim=-1).eq(supervised_targets).sum()
                 )
             seen += current_size
-        supervised_count = example_count * num_kv_pairs
+        queries_per_example = num_kv_pairs if config.task == "mqar" else 1
+        supervised_count = example_count * queries_per_example
         for name in models:
             rows.append(
                 {
                     "method": name,
                     "stage": stage,
                     "sequence_length": sequence_length,
-                    "logical_query_span": logical_query_span(
-                        sequence_length, num_kv_pairs,
+                    "logical_query_span": task_logical_query_span(
+                        config, sequence_length, num_kv_pairs,
                     ),
+                    "task_size": task_size(config, sequence_length, num_kv_pairs),
                     "num_kv_pairs": num_kv_pairs,
                     "examples": example_count,
                     "supervised_queries": supervised_count,
@@ -1195,7 +1301,7 @@ def summarize_grid(rows: list[dict[str, Any]],) -> dict[str, dict[str, float | N
 def run_experiment(
     output_dir: Path, *, device: torch.device, config: ExperimentConfig,
 ) -> dict[str, Any] | None:
-    """Train one method with its own persistent Zoology MQAR curriculum."""
+    """Train one method with its own persistent recall curriculum."""
 
     world_size = _world_size()
     rank = _rank()
@@ -1336,8 +1442,11 @@ def run_experiment(
                 "enabled": config.curriculum_enabled,
                 "stage_before_probe": frontier_stage,
                 "sequence_length_before_probe": frontier_length,
-                "logical_query_span_before_probe": logical_query_span(
-                    frontier_length, frontier_pairs,
+                "logical_query_span_before_probe": task_logical_query_span(
+                    config, frontier_length, frontier_pairs,
+                ),
+                "task_size_before_probe": task_size(
+                    config, frontier_length, frontier_pairs,
                 ),
                 "num_kv_pairs_before_probe": frontier_pairs,
             }
@@ -1374,8 +1483,11 @@ def run_experiment(
                         "sequence_length_after_probe": (
                             curriculum_state.current_task(config)[0]
                         ),
-                        "logical_query_span_after_probe": logical_query_span(
-                            *curriculum_state.current_task(config)
+                        "logical_query_span_after_probe": task_logical_query_span(
+                            config, *curriculum_state.current_task(config)
+                        ),
+                        "task_size_after_probe": task_size(
+                            config, *curriculum_state.current_task(config)
                         ),
                         "num_kv_pairs_after_probe": (
                             curriculum_state.current_task(config)[1]
@@ -1424,11 +1536,12 @@ def run_experiment(
         )
         sequence_length = config.curriculum_sequence_lengths[sampled_stage]
         num_kv_pairs = config.curriculum_num_kv_pairs[sampled_stage]
-        batch = sample_batch(
+        batch = _sample_task_batch(
+            config,
+            task_config,
             config.batch_size,
             sequence_length,
             num_kv_pairs,
-            task_config,
             generator=data_generator,
         ).to(device)
 
@@ -1484,15 +1597,24 @@ def run_experiment(
                 "generation": generation,
                 "sampled_stage": sampled_stage,
                 "sampled_sequence_length": sequence_length,
-                "sampled_logical_query_span": logical_query_span(
-                    sequence_length, num_kv_pairs,
+                "sampled_logical_query_span": task_logical_query_span(
+                    config, sequence_length, num_kv_pairs,
+                ),
+                "sampled_task_size": task_size(
+                    config, sequence_length, num_kv_pairs,
                 ),
                 "sampled_num_kv_pairs": num_kv_pairs,
                 "curriculum_stage": curriculum_state.stage,
                 "curriculum_sequence_length": (
                     config.curriculum_sequence_lengths[training_frontier]
                 ),
-                "curriculum_logical_query_span": logical_query_span(
+                "curriculum_logical_query_span": task_logical_query_span(
+                    config,
+                    config.curriculum_sequence_lengths[training_frontier],
+                    config.curriculum_num_kv_pairs[training_frontier],
+                ),
+                "curriculum_task_size": task_size(
+                    config,
                     config.curriculum_sequence_lengths[training_frontier],
                     config.curriculum_num_kv_pairs[training_frontier],
                 ),
@@ -1588,7 +1710,11 @@ def run_experiment(
         else []
     )
     results: dict[str, Any] = {
-        "experiment": "single_method_zoology_mqar_curriculum",
+        "experiment": (
+            "single_method_dense_recall_curriculum"
+            if config.task == "dense-recall"
+            else "single_method_zoology_mqar_curriculum"
+        ),
         "method": config.method,
         "config": asdict(config),
         "start": provenance,
@@ -1635,7 +1761,13 @@ def run_experiment(
             "last_trained_sequence_length": (
                 config.curriculum_sequence_lengths[last_training_stage]
             ),
-            "last_trained_logical_query_span": logical_query_span(
+            "last_trained_logical_query_span": task_logical_query_span(
+                config,
+                config.curriculum_sequence_lengths[last_training_stage],
+                config.curriculum_num_kv_pairs[last_training_stage],
+            ),
+            "last_trained_task_size": task_size(
+                config,
                 config.curriculum_sequence_lengths[last_training_stage],
                 config.curriculum_num_kv_pairs[last_training_stage],
             ),
@@ -1644,8 +1776,11 @@ def run_experiment(
             ),
             "next_stage": curriculum_state.current_stage(config),
             "next_sequence_length": curriculum_state.current_task(config)[0],
-            "next_logical_query_span": logical_query_span(
-                *curriculum_state.current_task(config)
+            "next_logical_query_span": task_logical_query_span(
+                config, *curriculum_state.current_task(config)
+            ),
+            "next_task_size": task_size(
+                config, *curriculum_state.current_task(config)
             ),
             "next_num_kv_pairs": curriculum_state.current_task(config)[1],
             "final_stage": curriculum_state.stage,
@@ -1682,6 +1817,7 @@ def _parse_int_tuple(value: str) -> tuple[int, ...]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=("bptt", "eggroll"), required=True)
+    parser.add_argument("--task", choices=("mqar", "dense-recall"))
     parser.add_argument("--preset", choices=("smoke", "reference"), default="smoke")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/smoke"))
     parser.add_argument("--device", default="auto")
@@ -1793,6 +1929,7 @@ def _apply_cli_overrides(
 ) -> ExperimentConfig:
     names = (
         "method",
+        "task",
         "seed",
         "generations",
         "batch_size",

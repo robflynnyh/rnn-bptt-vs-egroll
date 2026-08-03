@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from rnn_bptt_vs_eggroll.experiment import (
+    DENSE_RECALL_CURRICULUM,
     GENTLE_CURRICULUM,
     REFERENCE_CURRICULUM,
     CurriculumState,
@@ -48,6 +49,13 @@ def test_named_curriculum_schedules_are_exact() -> None:
     )
     assert GENTLE_CURRICULUM[7:] == REFERENCE_CURRICULUM[1:]
 
+    dense = apply_curriculum_schedule(reference, "dense-recall")
+    assert dense.task == "dense-recall"
+    assert dense.curriculum_schedule == "dense-recall"
+    assert len(DENSE_RECALL_CURRICULUM) == 1_024
+    assert DENSE_RECALL_CURRICULUM[0] == (4, 1)
+    assert DENSE_RECALL_CURRICULUM[-1] == (2_050, 1_024)
+
 
 def test_curriculum_advances_after_one_passing_probe() -> None:
     config = replace(smoke_config(), curriculum_accuracy_threshold=0.75,)
@@ -58,6 +66,44 @@ def test_curriculum_advances_after_one_passing_probe() -> None:
     assert state.current_task(config) == (16, 2)
     assert transition["from_logical_query_span"] == 3
     assert transition["to_logical_query_span"] == 6
+
+
+def test_dense_recall_smoke_advances_by_one_pair(tmp_path) -> None:
+    config = replace(
+        smoke_config(seed=41),
+        method="bptt",
+        task="dense-recall",
+        curriculum_schedule="custom",
+        curriculum_sequence_lengths=(4, 6),
+        curriculum_num_kv_pairs=(1, 2),
+        curriculum_accuracy_threshold=0.0,
+        curriculum_frontier_probability=1.0,
+        curriculum_probe_examples=4,
+        evaluation_frontier_only=True,
+        evaluation_interval=1,
+        evaluation_examples=4,
+        test_examples=4,
+        evaluation_batch_size=4,
+        generations=2,
+    )
+
+    result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
+
+    assert result is not None
+    transition = result["curriculum"]["transitions"][0]
+    assert transition["from_sequence_length"] == 4
+    assert transition["to_sequence_length"] == 6
+    assert transition["from_task_size"] == 1
+    assert transition["to_task_size"] == 2
+    assert transition["from_logical_query_span"] is None
+    assert transition["to_logical_query_span"] is None
+    assert result["update_history"][0]["sampled_sequence_length"] == 4
+    assert result["update_history"][0]["sampled_task_size"] == 1
+    assert all(
+        row["logical_query_span"] is None
+        for entry in result["validation_history"]
+        for row in entry["grid"]
+    )
 
 
 def test_eggroll_learning_rate_holds_then_cosine_decays() -> None:
