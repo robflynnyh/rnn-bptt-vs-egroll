@@ -126,6 +126,7 @@ class ExperimentConfig:
     curriculum_accuracy_threshold: float = 0.9
     curriculum_frontier_probability: float = 0.5
     curriculum_probe_examples: int = 512
+    curriculum_max_updates_per_stage: int | None = None
     dense_recall_coupled_vocab: bool = False
     final_full_curriculum_probe: bool = False
     evaluation_examples: int = 1_024
@@ -268,6 +269,16 @@ class ExperimentConfig:
             raise ValueError("curriculum_frontier_probability must be in [0, 1]")
         if self.curriculum_probe_examples < 1:
             raise ValueError("curriculum_probe_examples must be positive")
+        if (
+            self.curriculum_max_updates_per_stage is not None
+            and self.curriculum_max_updates_per_stage < 1
+        ):
+            raise ValueError("curriculum stage update limit must be positive")
+        if (
+            self.curriculum_max_updates_per_stage is not None
+            and self.method != "bptt"
+        ):
+            raise ValueError("curriculum stage update limit currently requires BPTT")
         if self.vocab_size <= max(self.curriculum_sequence_lengths):
             raise ValueError(
                 "vocab_size must exceed every reported sequence length"
@@ -571,6 +582,7 @@ _RESUME_IGNORED_FIELDS = {
     "bootstrap_allow_optimizer_override",
     "bootstrap_allow_curriculum_sampling_override",
     "resume_checkpoint",
+    "curriculum_max_updates_per_stage",
     "checkpoint_interval",
     "log_interval",
     "wandb_log_interval",
@@ -1555,7 +1567,15 @@ def run_experiment(
     if config.resume_checkpoint is None:
         record(start_generation, allow_curriculum_advance=False)
     experiment_start = time.perf_counter()
+    completed_generation = start_generation
+    stopping_reason: dict[str, Any] | None = None
+    stage_started_at = (
+        int(curriculum_state.transitions[-1]["generation"])
+        if curriculum_state.transitions
+        else 0
+    )
     for generation in range(start_generation + 1, config.generations + 1):
+        completed_generation = generation
         if (
             config.method == "eggroll"
             and config.eggroll_update_rule == "standardized"
@@ -1683,7 +1703,62 @@ def run_experiment(
             generation % config.evaluation_interval == 0
             or generation == config.generations
         ):
+            stage_before_probe = curriculum_state.current_stage(config)
             record(generation, allow_curriculum_advance=True)
+            stage_after_probe = curriculum_state.current_stage(config)
+            if stage_after_probe != stage_before_probe:
+                stage_started_at = generation
+            elif (
+                config.curriculum_max_updates_per_stage is not None
+                and generation - stage_started_at
+                >= config.curriculum_max_updates_per_stage
+            ):
+                latest_curriculum = validation_history[-1]["curriculum"]
+                latest_accuracy = float(latest_curriculum["frontier_accuracy"])
+                final_stage = len(config.curriculum_sequence_lengths) - 1
+                status = (
+                    "final_stage_passed"
+                    if stage_after_probe == final_stage
+                    and latest_accuracy >= config.curriculum_accuracy_threshold
+                    else "stage_budget_exhausted"
+                )
+                stage_accuracies = [
+                    float(entry["curriculum"]["frontier_accuracy"])
+                    for entry in validation_history
+                    if entry["curriculum"].get("stage_before_probe")
+                    == stage_after_probe
+                ]
+                stopping_reason = {
+                    "status": status,
+                    "generation": generation,
+                    "stage": stage_after_probe,
+                    "num_kv_pairs": config.curriculum_num_kv_pairs[
+                        stage_after_probe
+                    ],
+                    "input_sequence_length": (
+                        config.curriculum_sequence_lengths[stage_after_probe] - 1
+                    ),
+                    "full_sequence_length": config.curriculum_sequence_lengths[
+                        stage_after_probe
+                    ],
+                    "updates_at_stage": generation - stage_started_at,
+                    "latest_accuracy": latest_accuracy,
+                    "best_accuracy": max(stage_accuracies),
+                    "accuracy_threshold": config.curriculum_accuracy_threshold,
+                }
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "curriculum/stopped": 1.0,
+                            "curriculum/stopping_stage": float(stage_after_probe),
+                            "curriculum/stopping_task_size": float(
+                                config.curriculum_num_kv_pairs[stage_after_probe]
+                            ),
+                            "curriculum/stopping_best_accuracy": max(
+                                stage_accuracies
+                            ),
+                        }
+                    )
         if (
             config.checkpoint_interval is not None
             and generation % config.checkpoint_interval == 0
@@ -1706,6 +1781,10 @@ def run_experiment(
             )
             if config.log_progress:
                 print(json.dumps({"checkpoint": str(checkpoint_path)}), flush=True)
+        if stopping_reason is not None:
+            if config.log_progress:
+                print(json.dumps({"stopping": stopping_reason}), flush=True)
+            break
 
     _synchronize(device)
     experiment_seconds = time.perf_counter() - experiment_start
@@ -1775,13 +1854,14 @@ def run_experiment(
             ),
         },
         "budgets": {
-            "unique_training_sequences": config.generations * config.batch_size,
-            "training_sequences": config.generations * config.batch_size,
+            "completed_generations": completed_generation,
+            "unique_training_sequences": completed_generation * config.batch_size,
+            "training_sequences": completed_generation * config.batch_size,
             "continuation_training_sequences": (
-                (config.generations - start_generation) * config.batch_size
+                (completed_generation - start_generation) * config.batch_size
             ),
             "eggroll_candidate_forward_sequences": (
-                config.generations
+                completed_generation
                 * config.population_size
                 * (1 if config.population_data_mode == "grouped" else config.batch_size)
                 if config.method == "eggroll"
@@ -1794,6 +1874,7 @@ def run_experiment(
         },
         "validation_history": validation_history,
         "update_history": update_history,
+        "stopping": stopping_reason,
         "curriculum": {
             "enabled": config.curriculum_enabled,
             "last_trained_stage": last_training_stage,
@@ -1888,6 +1969,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--curriculum-accuracy-threshold", type=float)
     parser.add_argument("--curriculum-frontier-probability", type=float)
     parser.add_argument("--curriculum-probe-examples", type=int)
+    parser.add_argument("--curriculum-max-updates-per-stage", type=int)
     parser.add_argument(
         "--dense-recall-coupled-vocab",
         action=argparse.BooleanOptionalAction,
@@ -1991,6 +2073,7 @@ def _apply_cli_overrides(
         "curriculum_accuracy_threshold",
         "curriculum_frontier_probability",
         "curriculum_probe_examples",
+        "curriculum_max_updates_per_stage",
         "dense_recall_coupled_vocab",
         "evaluation_examples",
         "test_examples",

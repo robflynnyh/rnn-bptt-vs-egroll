@@ -116,6 +116,46 @@ def test_dense_recall_smoke_advances_by_one_pair(tmp_path) -> None:
     )
 
 
+def test_dense_recall_stops_after_stage_update_budget(tmp_path) -> None:
+    config = replace(
+        smoke_config(seed=43),
+        method="bptt",
+        task="dense-recall",
+        architecture="lstm",
+        curriculum_schedule="custom",
+        curriculum_sequence_lengths=(6,),
+        curriculum_num_kv_pairs=(2,),
+        curriculum_accuracy_threshold=1.0,
+        curriculum_max_updates_per_stage=1,
+        dense_recall_coupled_vocab=True,
+        curriculum_frontier_probability=1.0,
+        curriculum_probe_examples=128,
+        evaluation_frontier_only=True,
+        evaluation_interval=1,
+        evaluation_examples=128,
+        test_examples=4,
+        evaluation_batch_size=128,
+        generations=10,
+    )
+
+    result = run_experiment(tmp_path, device=torch.device("cpu"), config=config)
+
+    assert result is not None
+    assert result["budgets"]["completed_generations"] == 1
+    assert result["stopping"] == {
+        "status": "stage_budget_exhausted",
+        "generation": 1,
+        "stage": 0,
+        "num_kv_pairs": 2,
+        "input_sequence_length": 5,
+        "full_sequence_length": 6,
+        "updates_at_stage": 1,
+        "latest_accuracy": 0.0,
+        "best_accuracy": 0.0,
+        "accuracy_threshold": 1.0,
+    }
+
+
 def test_eggroll_learning_rate_holds_then_cosine_decays() -> None:
     config = replace(
         smoke_config(),

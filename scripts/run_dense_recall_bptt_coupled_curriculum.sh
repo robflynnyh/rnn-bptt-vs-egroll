@@ -61,6 +61,7 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --bptt-weight-decay 0 \
     --bptt-gradient-clip 5 \
     --curriculum-accuracy-threshold 0.9 \
+    --curriculum-max-updates-per-stage 20000 \
     --curriculum-frontier-probability 1 \
     --curriculum-probe-examples 512 \
     --no-final-full-curriculum-probe \
