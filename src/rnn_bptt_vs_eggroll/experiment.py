@@ -660,11 +660,14 @@ def _resume_signature(config: ExperimentConfig) -> dict[str, Any]:
 
 
 def _normalise_resume_signature(signature: dict[str, Any]) -> dict[str, Any]:
-    return {
+    normalised = {
         name: _normalise_config_value(value)
         for name, value in signature.items()
         if name not in _RESUME_IGNORED_FIELDS
     }
+    for name, default in _LEGACY_CONFIG_DEFAULTS.items():
+        normalised.setdefault(name, _normalise_config_value(default))
+    return normalised
 
 
 def _load_bootstrap_state(
