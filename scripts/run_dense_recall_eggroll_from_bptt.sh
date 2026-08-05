@@ -7,8 +7,8 @@ gpu_pool="${GPU_POOL:-all}"
 python_bin="${PYTHON_BIN:-/store/store4/software/bin/anaconda3/envs/flash_attn_pytorch2/bin/python}"
 target_generations="${GENERATIONS:-2100000}"
 parent_dir="${PARENT_DIR:-$repo_root/artifacts/dense_recall/seed-7/bptt-lstm-tied-coupled-vocab}"
-output_dir="${OUTPUT_DIR:-$repo_root/artifacts/dense_recall/seed-7/eggroll-from-bptt-2m}"
-wandb_run_id="${WANDB_RUN_ID:-bpttegg1}"
+output_dir="${OUTPUT_DIR:-$repo_root/artifacts/dense_recall/seed-7/eggroll-from-bptt-2m-lr0p03}"
+wandb_run_id="${WANDB_RUN_ID:-bpttegg2}"
 
 if [[ ! -x "$python_bin" ]]; then
     echo "Set PYTHON_BIN to an executable Python interpreter" >&2
@@ -77,8 +77,8 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --no-adaptive-mutation-scales \
     --fitness-shaping zscore \
     --eggroll-update-rule standardized \
-    --eggroll-learning-rate 0.3 \
-    --eggroll-learning-rate-final 0.01 \
+    --eggroll-learning-rate 0.03 \
+    --eggroll-learning-rate-final 0.003 \
     --eggroll-learning-rate-decay-start 2000000 \
     --eggroll-learning-rate-decay-end "$target_generations" \
     --eggroll-weight-decay 0 \
@@ -100,7 +100,7 @@ exec "$python_bin" -u -m rnn_bptt_vs_eggroll.experiment \
     --wandb \
     --wandb-project rnn-bptt-vs-eggroll \
     --wandb-entity wobrob101 \
-    --wandb-run-name dense-recall-eggroll-from-bptt-2m-seed7 \
+    --wandb-run-name dense-recall-eggroll-from-bptt-2m-lr0p03-seed7 \
     --wandb-group dense-recall-optimizer-handoff \
     --wandb-run-id "$wandb_run_id" \
     --wandb-resume allow \
