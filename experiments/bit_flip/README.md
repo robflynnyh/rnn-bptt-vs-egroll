@@ -28,3 +28,14 @@ bash scripts/run_bit_flip_bptt.sh
 The run keeps one overwritten `checkpoint.pt`, rather than accumulating
 generation snapshots. Final weights and metrics are written as `model.pt` and
 `metrics.json`.
+
+## Initial result
+
+The seed-7 BPTT run passed every one of the 60 curriculum stages, reaching
+100% fixed-validation accuracy at 16,384 operations after 6,000 updates. No
+BPTT length limit was observed. This is a useful negative result for the
+optimizer comparison: once the tanh RNN discovered the exact one-bit state
+transition, increasing the number of repeated operations did not make the task
+harder for BPTT under curriculum.
+
+[W&B run](https://wandb.ai/wobrob101/rnn-bptt-vs-eggroll/runs/bitflipb1)
