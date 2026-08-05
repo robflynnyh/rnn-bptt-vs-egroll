@@ -154,7 +154,8 @@ artifact directory and W&B run; the BPTT parent remains unchanged.
 The default EGGROLL configuration matches the strongest prior tied-vocabulary
 search setup: a rank-1 population of 8,192 candidates, Cartesian batches of 64,
 BF16 candidate forwards, z-score fitness, `sigma=0.005`, and a learning rate
-decaying from 0.03 to 0.003 over 100,000 continuation updates. The lower rate
+decaying from 0.03 to 0.003 over the first 10,000 continuation updates, then
+remaining at 0.003 for the rest of the 100,000-update run. The lower rate
 is specific to the pretrained handoff: 0.3 destroyed the inherited solution
 within the first few updates, while controlled 25-update screens at 0.003,
 0.01, and 0.03 preserved its frontier accuracy.
