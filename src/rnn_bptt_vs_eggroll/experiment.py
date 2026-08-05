@@ -181,6 +181,7 @@ class ExperimentConfig:
     bootstrap_metrics_path: str | None = None
     bootstrap_allow_optimizer_override: bool = False
     bootstrap_allow_curriculum_sampling_override: bool = False
+    bootstrap_allow_method_override: bool = False
     resume_checkpoint: str | None = None
     checkpoint_interval: int | None = None
     log_progress: bool = False
@@ -410,6 +411,8 @@ class ExperimentConfig:
             raise ValueError(
                 "resume checkpoint and bootstrap paths are mutually exclusive"
             )
+        if bootstrap_paths[0] is None and self.bootstrap_allow_method_override:
+            raise ValueError("bootstrap overrides require bootstrap paths")
         if self.checkpoint_interval is not None and self.checkpoint_interval < 1:
             raise ValueError("checkpoint_interval must be positive")
 
@@ -613,6 +616,7 @@ _RESUME_IGNORED_FIELDS = {
     "bootstrap_metrics_path",
     "bootstrap_allow_optimizer_override",
     "bootstrap_allow_curriculum_sampling_override",
+    "bootstrap_allow_method_override",
     "resume_checkpoint",
     "curriculum_max_updates_per_stage",
     "checkpoint_interval",
@@ -643,6 +647,27 @@ _BOOTSTRAP_OPTIMIZER_FIELDS = {
     "bptt_weight_decay",
 }
 _BOOTSTRAP_CURRICULUM_SAMPLING_FIELDS = {"curriculum_frontier_probability"}
+_BOOTSTRAP_METHOD_FIELDS = {
+    "method",
+    "batch_size",
+    "population_size",
+    "population_chunk_size",
+    "population_data_mode",
+    "population_precision",
+    "perturbation_rank",
+    "sigma",
+    "sigma_decay",
+    "adaptive_mutation_scales",
+    "mutation_scale_learning_rate",
+    "mutation_scale_min",
+    "mutation_scale_max",
+    "fitness_shaping",
+    "eggroll_update_rule",
+    "elite_count",
+    "elite_commit_scale",
+    "bptt_gradient_clip",
+    *_BOOTSTRAP_OPTIMIZER_FIELDS,
+}
 
 
 def _normalise_config_value(value: Any) -> Any:
@@ -686,6 +711,8 @@ def _load_bootstrap_state(
     parent_config = metrics["config"]
     mismatches = []
     for name in _BOOTSTRAP_MATCH_FIELDS:
+        if config.bootstrap_allow_method_override and name in _BOOTSTRAP_METHOD_FIELDS:
+            continue
         if (
             config.bootstrap_allow_optimizer_override
             and name in _BOOTSTRAP_OPTIMIZER_FIELDS
@@ -2180,6 +2207,11 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
     )
+    parser.add_argument(
+        "--bootstrap-allow-method-override",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--resume-checkpoint")
     parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--log-progress", action="store_true")
@@ -2277,6 +2309,10 @@ def _apply_cli_overrides(
     if args.bootstrap_allow_curriculum_sampling_override is not None:
         overrides["bootstrap_allow_curriculum_sampling_override"] = (
             args.bootstrap_allow_curriculum_sampling_override
+        )
+    if args.bootstrap_allow_method_override is not None:
+        overrides["bootstrap_allow_method_override"] = (
+            args.bootstrap_allow_method_override
         )
     if args.wandb is not None:
         overrides["wandb_enabled"] = args.wandb

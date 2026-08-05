@@ -141,5 +141,21 @@ bash scripts/run_dense_recall_bptt_product_vocab_curriculum.sh
 It uses the same one-layer 128-unit LSTM, Adam learning rate `1e-3`, batch 256,
 gradient clipping at 5, 90% promotion threshold, 200,000-update per-stage
 budget, and 2,000,000-update global ceiling as the coupled-vocabulary BPTT run.
-Its output directory and W&B identity are separate, so that paused run remains
-resumable from its generation-600,000 checkpoint.
+
+## BPTT-to-EGGROLL handoff
+
+`scripts/run_dense_recall_eggroll_from_bptt.sh` starts from the completed
+2,000,000-update coupled-vocabulary BPTT model and continues from its saved
+curriculum frontier using EGGROLL. The handoff preserves model weights, task
+configuration, and curriculum transitions, while intentionally resetting the
+optimizer and perturbation RNG. It writes to a separate
+artifact directory and W&B run; the BPTT parent remains unchanged.
+
+The default EGGROLL configuration matches the strongest prior tied-vocabulary
+search setup: a rank-1 population of 8,192 candidates, Cartesian batches of 64,
+BF16 candidate forwards, z-score fitness, `sigma=0.005`, and a learning rate
+decaying from 0.3 to 0.01 over 100,000 continuation updates.
+
+```bash
+bash scripts/run_dense_recall_eggroll_from_bptt.sh
+```

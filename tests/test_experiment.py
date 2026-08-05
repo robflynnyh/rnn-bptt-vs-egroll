@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from rnn_bptt_vs_eggroll.experiment import (
+    _state_checksum,
     DENSE_RECALL_CURRICULUM,
     DENSE_RECALL_FROM_TWO_CURRICULUM,
     GENTLE_CURRICULUM,
@@ -19,6 +20,7 @@ from rnn_bptt_vs_eggroll.experiment import (
     smoke_config,
     update_curriculum,
 )
+from rnn_bptt_vs_eggroll.model import TokenLSTM
 
 
 def test_logical_query_span_counts_available_query_slots() -> None:
@@ -547,6 +549,74 @@ def test_completed_run_can_bootstrap_a_longer_target(tmp_path) -> None:
     assert continuation["start"]["rng_continuity"] is False
     assert continuation["update_history"][0]["generation"] == 3
     assert continuation["budgets"]["continuation_training_sequences"] == 8
+
+
+def test_bptt_run_can_bootstrap_eggroll(tmp_path) -> None:
+    parent_config = replace(
+        smoke_config(seed=37),
+        method="bptt",
+        architecture="lstm",
+        tie_input_output=True,
+        generations=2,
+        evaluation_interval=1,
+        evaluation_examples=4,
+        test_examples=4,
+        evaluation_batch_size=4,
+        curriculum_probe_examples=4,
+        curriculum_accuracy_threshold=0.0,
+    )
+    parent_dir = tmp_path / "parent"
+    parent = run_experiment(
+        parent_dir, device=torch.device("cpu"), config=parent_config,
+    )
+    assert parent is not None
+    assert parent["curriculum"]["final_stage"] == 1
+
+    continuation_config = replace(
+        parent_config,
+        method="eggroll",
+        generations=3,
+        batch_size=4,
+        population_size=8,
+        population_chunk_size=2,
+        population_data_mode="grouped",
+        bootstrap_model_path=str(parent_dir / "model.pt"),
+        bootstrap_metrics_path=str(parent_dir / "metrics.json"),
+        bootstrap_allow_method_override=True,
+    )
+    with pytest.raises(ValueError, match="bootstrap configuration mismatch"):
+        run_experiment(
+            tmp_path / "rejected",
+            device=torch.device("cpu"),
+            config=replace(
+                continuation_config,
+                bootstrap_allow_method_override=False,
+            ),
+        )
+    continuation = run_experiment(
+        tmp_path / "continuation",
+        device=torch.device("cpu"),
+        config=continuation_config,
+    )
+
+    assert continuation is not None
+    assert continuation["start"] == {
+        "kind": "bootstrap",
+        "generation": 2,
+        "model_path": str(parent_dir / "model.pt"),
+        "metrics_path": str(parent_dir / "metrics.json"),
+        "rng_continuity": False,
+    }
+    parent_model = TokenLSTM(
+        parent_config.vocab_size,
+        parent_config.hidden_size,
+        tie_input_output=parent_config.tie_input_output,
+    )
+    parent_model.load_state_dict(
+        torch.load(parent_dir / "model.pt", map_location="cpu", weights_only=True)
+    )
+    assert continuation["model"]["initial_checksum"] == _state_checksum(parent_model)
+    assert continuation["update_history"][0]["generation"] == 3
 
 
 def test_wandb_tracks_full_single_method_run(tmp_path, monkeypatch) -> None:
