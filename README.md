@@ -104,6 +104,20 @@ bash scripts/run_dense_recall_curriculum.sh
 See the [dense-recall protocol](experiments/dense_recall/README.md) for the
 fixed optimizer and stopping configuration.
 
+### One-bit flip task
+
+The one-bit flip experiment removes the growing-memory and growing-vocabulary
+requirements of associative recall. A fixed five-token input vocabulary tells
+the RNN to initialize, hold, or flip one bit; a terminal query has only two
+possible answers. Only the number of recurrent operations grows.
+
+```bash
+bash scripts/run_bit_flip_bptt.sh
+```
+
+See the [bit-flip protocol](experiments/bit_flip/README.md) for the curriculum,
+optimizer, stopping rule, and metric definitions.
+
 ## Methods
 
 Matching seeds produce byte-identical initial parameters in the same RNN.
